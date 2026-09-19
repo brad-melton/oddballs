@@ -2,6 +2,14 @@ fastapi==0.115.0
 uvicorn[standard]==0.32.0
 pandas==2.2.3
 
+# Loads the trained models (models/*.pkl) for predict_single_game.py /
+# monte_carlo_game.py / pool_standings.py. joblib.load() needs scikit-learn
+# installed too, even though load_models.py never imports it by name --
+# that's what actually unpickles the GradientBoostingRegressor/Classifier
+# and ColumnTransformer objects.
+joblib==1.6.0
+scikit-learn==1.9.1
+
 # Hosted DB (Turso) -- Linux/macOS only, no Windows wheels (confirmed: fails
 # to build locally on this machine, needs a Rust toolchain it doesn't have).
 # Only actually imported when TURSO_DATABASE_URL is set (see backend/db.py),
