@@ -17,12 +17,15 @@ app = FastAPI(title="Diamond Odds API")
 
 VALID_PHASES = ("pool-play", "bracket-play")
 
-# TODO: once the frontend is deployed to GitHub Pages, replace "*" with
-# your actual Pages URL (e.g. "https://yourusername.github.io") so only
-# your site can call this API.
+# CORS only checks scheme+host+port, not path, so this covers GitHub Pages
+# whether it ends up serving from the root or a /oddballs subpath.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "https://brad-melton.github.io",
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+    ],
     allow_methods=["*"],
     allow_headers=["*"],
 )

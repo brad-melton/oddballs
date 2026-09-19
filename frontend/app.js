@@ -2,12 +2,11 @@
    Tournament data loads from the backend (GET /api/tournaments).
    Pool play / bracket play games, predictions, and score updates
    all hit real endpoints too — see populate/predict/saveScores
-   below. Every one of them will 501 until simulation.py's
-   populate_games/predict_games/update_scores are filled in.
+   below.
    ============================================================ */
-// TODO: point this at your deployed Render URL once it's live, e.g.
-// const API_BASE = 'https://your-backend.onrender.com';
-const API_BASE = 'http://localhost:8000';
+// Local dev: run backend/app.py locally and point this at
+// http://localhost:8000 instead.
+const API_BASE = 'https://oddballs.onrender.com';
 
 let TOURNAMENTS = [];
 let selectedTournament = null;
