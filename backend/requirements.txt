@@ -1,0 +1,16 @@
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+pandas==2.2.3
+
+# Hosted DB (Turso) -- Linux/macOS only, no Windows wheels (confirmed: fails
+# to build locally on this machine, needs a Rust toolchain it doesn't have).
+# Only actually imported when TURSO_DATABASE_URL is set (see backend/db.py),
+# which never happens in local Windows dev -- installed here for the Docker
+# image these get deployed in.
+sqlalchemy==2.0.36
+sqlalchemy-libsql==0.2.0
+
+# Selenium + Chrome for the on-demand pool-play scrape (_fetch_schedule_html
+# in simulation.py). Installed for the Docker image; Chrome itself gets
+# installed at the OS level in the Dockerfile, not via pip.
+selenium==4.35.0

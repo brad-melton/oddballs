@@ -1,0 +1,18 @@
+.venv/
+backend/.venv/
+__pycache__/
+node_modules/
+*.log
+deploy/
+*.db
+*.db-wal
+*.db-shm
+.git/
+.vscode/
+frontend/
+archive projects/
+bb-predictor-ui/
+test_scrape_*.py
+test_scrape_*.log
+run_output_*.log
+run_phase2_3_only.py

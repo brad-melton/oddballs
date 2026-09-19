@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1">
+<title>Diamond Odds — Tournament Workflow</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Teko:wght@500;600;700&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header>
+  <div class="brand">⚾ DIAMOND<span class="dot">·</span>ODDS</div>
+  <div class="tagline">Youth tournament Monte Carlo simulator</div>
+</header>
+
+<main>
+  <div class="controls-col">
+    <div class="card">
+      <p class="card-label">Tournament</p>
+      <div class="select-wrap">
+        <input class="select-input" id="tournamentInput" placeholder="Search tournaments…" autocomplete="off">
+        <div class="dropdown-list" id="tournamentList"></div>
+      </div>
+    </div>
+
+    <div class="card" id="phaseCard" style="display:none;">
+      <p class="card-label">Phase</p>
+      <div class="mode-tabs" id="phaseTabs">
+        <div class="mode-tab active" data-phase="pool-play"><span class="icon">🔁</span>Pool Play</div>
+        <div class="mode-tab" data-phase="bracket-play"><span class="icon">🏆</span>Bracket Play</div>
+      </div>
+    </div>
+
+    <div class="card" id="actionCard" style="display:none;">
+      <p class="card-label">Action</p>
+      <div class="action-list">
+        <button class="action-btn" data-action="populate"><span class="icon">🗓️</span><span><span class="action-title">Populate Games</span><span class="action-sub">Generate the schedule if it doesn't exist yet</span></span></button>
+        <button class="action-btn" data-action="predict"><span class="icon">🎲</span><span><span class="action-title">Predict</span><span class="action-sub">Run Monte Carlo win probabilities per game</span></span></button>
+        <button class="action-btn" data-action="scores"><span class="icon">✏️</span><span><span class="action-title">Update Scores</span><span class="action-sub">Enter final results for completed games</span></span></button>
+        <button class="action-btn" data-action="standings" id="standingsBtn"><span class="icon">📊</span><span><span class="action-title">Pool Standings</span><span class="action-sub">Simulate a team's odds of finishing 1st, 2nd, 3rd…</span></span></button>
+      </div>
+      <div class="sim-status" id="simStatus"></div>
+    </div>
+  </div>
+
+  <div>
+    <div class="card" id="emptyState">
+      <p class="placeholder-note" id="emptyStateText">Pick a tournament to get started.</p>
+    </div>
+    <div class="card" id="results" style="display:none;"></div>
+  </div>
+</main>
+
+<div class="modal-overlay" id="explainModal" style="display:none;">
+  <div class="modal-card">
+    <button class="modal-close" id="explainClose" aria-label="Close">&times;</button>
+    <div id="explainContent"></div>
+  </div>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

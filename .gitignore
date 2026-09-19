@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.pyc
+.venv/
+backend/.venv/
+
+# Node
+node_modules/
+
+# Logs
+*.log
+
+# Local data / deployment artifacts -- never commit the real database or a
+# WAL-mode copy of it; the deployed backend reads from Turso instead (see
+# backend/db.py). Re-generate deploy/*.db locally whenever it's needed again.
+deploy/
+*.db
+*.db-wal
+*.db-shm
+
+# Stray local binaries -- irrelevant to the Linux Docker deploy target and
+# don't belong in source control regardless.
+*.exe
+
+# Editor / OS
+.vscode/
+.DS_Store
+Thumbs.db

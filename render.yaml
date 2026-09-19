@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: diamond-odds-backend
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: free
+    envVars:
+      # Set these in the Render dashboard, not here -- never commit real
+      # secrets to git. Leaving TURSO_DATABASE_URL unset would fall back to
+      # backend/db.py's local sqlite path, which doesn't exist on Render,
+      # so both must be set for the deployed service to work.
+      - key: TURSO_DATABASE_URL
+        sync: false
+      - key: TURSO_AUTH_TOKEN
+        sync: false
