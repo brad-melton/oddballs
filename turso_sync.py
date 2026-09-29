@@ -69,10 +69,20 @@ def enabled() -> bool:
     return bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
 
 
-def sync_to_turso(verbose: bool = True) -> dict:
+def sync_to_turso(verbose: bool = True, event_id: str = None) -> dict:
     """
     Pushes events / teams / games from the local sqlite file into Turso.
     No-ops (returns {"synced": False}) if Turso isn't configured.
+
+    With event_id given (matching --event on the pipeline), scopes all
+    three syncs to just that event instead of the whole local database --
+    a full sync re-pushes every event/team/game every run regardless of
+    what actually changed (confirmed: ~248 event calls + ~607 team calls
+    + one call per already-existing game, ~6,000+ round trips total even
+    when only one event's worth of games actually changed), which is fine
+    on wifi but can take tens of minutes on a slower/higher-latency
+    connection like a phone hotspot for what should be a quick single-
+    event rescrape.
     """
     if not enabled():
         if verbose:
@@ -86,9 +96,9 @@ def sync_to_turso(verbose: bool = True) -> dict:
     remote = turso_serverless.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
 
     try:
-        events_synced = _sync_events(local, remote)
-        teams_synced = _sync_teams(local, remote)
-        games_inserted, games_updated = _sync_games(local, remote)
+        events_synced = _sync_events(local, remote, event_id)
+        teams_synced = _sync_teams(local, remote, event_id)
+        games_inserted, games_updated = _sync_games(local, remote, event_id)
         remote.commit()
     finally:
         local.close()
@@ -106,15 +116,20 @@ def sync_to_turso(verbose: bool = True) -> dict:
     return summary
 
 
-def _sync_events(local, remote) -> int:
+def _sync_events(local, remote, event_id: str = None) -> int:
     """
-    Upserts every event -- the live app never writes to the events table,
-    so a plain overwrite is safe. events.eventid has no unique constraint
-    (confirmed via the schema), so this uses delete-then-insert rather
-    than ON CONFLICT.
+    Upserts every event (or just event_id, if given) -- the live app never
+    writes to the events table, so a plain overwrite is safe. events.eventid
+    has no unique constraint (confirmed via the schema), so this uses
+    delete-then-insert rather than ON CONFLICT.
     """
-    rows = local.execute(f"SELECT {', '.join(_EVENT_COLUMNS)} FROM events").fetchall()
     cols = _EVENT_COLUMNS
+    if event_id:
+        rows = local.execute(
+            f"SELECT {', '.join(cols)} FROM events WHERE eventid = ?", (event_id,)
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM events").fetchall()
     for row in rows:
         eventid = row["eventid"]
         _retry(lambda: remote.execute("DELETE FROM events WHERE eventid = ?", [eventid]))
@@ -125,11 +140,27 @@ def _sync_events(local, remote) -> int:
     return len(rows)
 
 
-def _sync_teams(local, remote) -> int:
+def _sync_teams(local, remote, event_id: str = None) -> int:
     """Inserts any team not already present in Turso, matched by
-    team_name (which does have a real UNIQUE constraint)."""
-    rows = local.execute(f"SELECT {', '.join(_TEAM_COLUMNS)} FROM teams").fetchall()
+    team_name (which does have a real UNIQUE constraint). With event_id
+    given, only considers teams that actually played in that event's
+    games -- teams have no eventid column of their own, so this is
+    matched via a subquery against games instead."""
     cols = _TEAM_COLUMNS
+    if event_id:
+        rows = local.execute(
+            f"""
+            SELECT {', '.join(cols)} FROM teams
+            WHERE team_name IN (
+                SELECT home_team FROM games WHERE eventid = ?
+                UNION
+                SELECT away_team FROM games WHERE eventid = ?
+            )
+            """,
+            (event_id, event_id),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM teams").fetchall()
     for row in rows:
         _retry(lambda: remote.execute(
             f"""
@@ -141,12 +172,16 @@ def _sync_teams(local, remote) -> int:
     return len(rows)
 
 
-def _sync_games(local, remote) -> tuple[int, int]:
+def _sync_games(local, remote, event_id: str = None) -> tuple[int, int]:
     """
-    Scoped to eventid IN (SELECT eventid FROM events) -- this pipeline's
-    own events, not the unrelated legacy dataset also present in the local
-    games table (confirmed: the events table itself only ever holds our
-    124 events, so this filter is exact, not approximate).
+    Scoped to eventid IN (SELECT eventid FROM events) by default -- this
+    pipeline's own events, not the unrelated legacy dataset also present in
+    the local games table (confirmed: the events table itself only ever
+    holds our 124 events, so this filter is exact, not approximate). With
+    event_id given, scoped to just that one event instead, both for the
+    local read and the remote bulk prefetch below -- a full sync otherwise
+    unconditionally re-sends an UPDATE for every already-existing game
+    under every event, not just the one that was actually rescraped.
 
     Matches games by (eventid, game_num) -- game_num is Perfect Game's own
     globally-unique GameID, not a display label, so this is a reliable
@@ -160,16 +195,25 @@ def _sync_games(local, remote) -> tuple[int, int]:
     on a transient network timeout, which a smaller request count also
     makes less likely to hit at all.)
     """
-    rows = local.execute(f"""
-        SELECT {', '.join(_GAME_COLUMNS)} FROM games
-        WHERE eventid IN (SELECT eventid FROM events)
-    """).fetchall()
+    if event_id:
+        scope_sql = "eventid = ?"
+        scope_params = (event_id,)
+    else:
+        scope_sql = "eventid IN (SELECT eventid FROM events)"
+        scope_params = ()
 
-    existing_rows = _retry(lambda: remote.execute(f"""
+    rows = local.execute(
+        f"SELECT {', '.join(_GAME_COLUMNS)} FROM games WHERE {scope_sql}", scope_params
+    ).fetchall()
+
+    existing_rows = _retry(lambda: remote.execute(
+        f"""
         SELECT eventid, game_num, {', '.join(_PROTECTED_GAME_COLUMNS)}
         FROM games
-        WHERE eventid IN (SELECT eventid FROM events) AND game_num IS NOT NULL
-    """).fetchall())
+        WHERE {scope_sql} AND game_num IS NOT NULL
+        """,
+        scope_params,
+    ).fetchall())
     existing_by_key = {(str(r[0]), r[1]): r[2:] for r in existing_rows}
 
     inserted = 0

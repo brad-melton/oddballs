@@ -811,7 +811,7 @@ def main(event_id=None):
         print("\n" + "="*70)
         print("PHASE 4: SYNCING NEW DATA TO TURSO")
         print("="*70 + "\n")
-        turso_sync.sync_to_turso()
+        turso_sync.sync_to_turso(event_id=event_id)
 
         print("\n" + "="*70)
         print("ALL PHASES COMPLETE - DATA PIPELINE FINISHED SUCCESSFULLY")
