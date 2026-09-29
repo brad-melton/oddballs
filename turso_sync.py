@@ -25,12 +25,31 @@ unaffected.
 """
 import os
 import sqlite3
+import time
 
 import env_local  # noqa: F401 -- loads .env.local into os.environ on import
 
 TURSO_DATABASE_URL = os.environ.get("TURSO_DATABASE_URL")
 TURSO_AUTH_TOKEN = os.environ.get("TURSO_AUTH_TOKEN")
 LOCAL_DB_PATH = os.environ.get("DB_PATH", r"C:\Users\bsmel\OneDrive\Documents\Baseball_data\10u data.db")
+
+# A full sync makes thousands of individual HTTP round trips (confirmed:
+# the first real run died partway through on a transient WinError 10060
+# timeout, with no retry). Every remote call goes through this wrapper.
+_RETRY_ATTEMPTS = 4
+_RETRY_DELAY_SECONDS = 3
+
+
+def _retry(fn):
+    last_exc = None
+    for attempt in range(_RETRY_ATTEMPTS):
+        try:
+            return fn()
+        except Exception as e:
+            last_exc = e
+            if attempt < _RETRY_ATTEMPTS - 1:
+                time.sleep(_RETRY_DELAY_SECONDS)
+    raise last_exc
 
 # Columns the live web app can also write -- see module docstring. Never
 # overwritten on a Turso game row that already has a non-null value here.
@@ -98,11 +117,11 @@ def _sync_events(local, remote) -> int:
     cols = _EVENT_COLUMNS
     for row in rows:
         eventid = row["eventid"]
-        remote.execute("DELETE FROM events WHERE eventid = ?", [eventid])
-        remote.execute(
+        _retry(lambda: remote.execute("DELETE FROM events WHERE eventid = ?", [eventid]))
+        _retry(lambda: remote.execute(
             f"INSERT INTO events ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
             [row[c] for c in cols],
-        )
+        ))
     return len(rows)
 
 
@@ -111,17 +130,15 @@ def _sync_teams(local, remote) -> int:
     team_name (which does have a real UNIQUE constraint)."""
     rows = local.execute(f"SELECT {', '.join(_TEAM_COLUMNS)} FROM teams").fetchall()
     cols = _TEAM_COLUMNS
-    added = 0
     for row in rows:
-        remote.execute(
+        _retry(lambda: remote.execute(
             f"""
             INSERT INTO teams ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
             ON CONFLICT(team_name) DO NOTHING
             """,
             [row[c] for c in cols],
-        )
-        added += 1
-    return added
+        ))
+    return len(rows)
 
 
 def _sync_games(local, remote) -> tuple[int, int]:
@@ -135,11 +152,25 @@ def _sync_games(local, remote) -> tuple[int, int]:
     globally-unique GameID, not a display label, so this is a reliable
     natural key. Games with no game_num (rare, pre-dates a scraper fix) are
     skipped rather than risk creating a duplicate from a guessed key.
+
+    Fetches every existing Turso game's protected columns in ONE bulk
+    query up front rather than one SELECT per local game -- with ~5,400
+    games that's the difference between ~1 request and ~5,400 of them.
+    (Confirmed the naive per-row version this replaced actually died mid-run
+    on a transient network timeout, which a smaller request count also
+    makes less likely to hit at all.)
     """
     rows = local.execute(f"""
         SELECT {', '.join(_GAME_COLUMNS)} FROM games
         WHERE eventid IN (SELECT eventid FROM events)
     """).fetchall()
+
+    existing_rows = _retry(lambda: remote.execute(f"""
+        SELECT eventid, game_num, {', '.join(_PROTECTED_GAME_COLUMNS)}
+        FROM games
+        WHERE eventid IN (SELECT eventid FROM events) AND game_num IS NOT NULL
+    """).fetchall())
+    existing_by_key = {(str(r[0]), r[1]): r[2:] for r in existing_rows}
 
     inserted = 0
     updated = 0
@@ -150,34 +181,29 @@ def _sync_games(local, remote) -> tuple[int, int]:
         if game_num is None:
             continue
 
-        existing = remote.execute(
-            "SELECT home_score, away_score, home_team_key, away_team_key "
-            "FROM games WHERE eventid = ? AND game_num = ?",
-            [eventid, game_num],
-        ).fetchone()
-
+        key = (str(eventid), game_num)
         values = {c: row[c] for c in _GAME_COLUMNS}
 
-        if existing is None:
+        if key not in existing_by_key:
             cols = list(values.keys())
-            remote.execute(
+            _retry(lambda: remote.execute(
                 f"INSERT INTO games ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})",
                 [values[c] for c in cols],
-            )
+            ))
             inserted += 1
         else:
-            existing_protected = dict(zip(_PROTECTED_GAME_COLUMNS, existing))
+            existing_protected = dict(zip(_PROTECTED_GAME_COLUMNS, existing_by_key[key]))
             set_cols = [c for c in _GAME_COLUMNS if c not in _PROTECTED_GAME_COLUMNS]
             for c in _PROTECTED_GAME_COLUMNS:
                 if existing_protected[c] is None and values[c] is not None:
                     set_cols.append(c)
 
             if set_cols:
-                remote.execute(
+                _retry(lambda: remote.execute(
                     f"UPDATE games SET {', '.join(f'{c} = ?' for c in set_cols)} "
                     f"WHERE eventid = ? AND game_num = ?",
                     [values[c] for c in set_cols] + [eventid, game_num],
-                )
+                ))
                 updated += 1
 
     return inserted, updated
