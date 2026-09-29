@@ -970,3 +970,75 @@ def explain_game(phase: str, tournament_id: str, game_id: str) -> dict:
         "pred_win_probability": round(preds["pred_win_probability"] * 100),
         "factors": factors,
     }
+
+
+def get_admin_status() -> dict:
+    """
+    Monitoring data for the admin page: every event (any status -- this
+    isn't scoped to complete/upcoming like the tournament picker, since
+    the whole point here is visibility into scheduled/cancelled/ongoing
+    events too) with its game counts. Works against whichever DB db.py
+    resolves to (local sqlite or Turso), same as everything else.
+
+    games.eventid is stored as TEXT and events.eventid as INTEGER -- SQLite
+    (and Turso, which is wire-compatible) coerces this correctly via
+    affinity rules in comparisons, but the two need explicit str()
+    normalization here since they end up as Python dict keys.
+    """
+    conn = _get_connection()
+    try:
+        events = conn.execute("""
+            SELECT eventid, name, status, classification, start_date, end_date
+            FROM events
+            ORDER BY start_date
+        """).fetchall()
+
+        game_counts = conn.execute("""
+            SELECT eventid,
+                   COUNT(*) AS total,
+                   SUM(CASE WHEN home_score IS NOT NULL AND away_score IS NOT NULL THEN 1 ELSE 0 END) AS completed,
+                   SUM(CASE WHEN format = 'pool' THEN 1 ELSE 0 END) AS pool,
+                   SUM(CASE WHEN format = 'bracket' THEN 1 ELSE 0 END) AS bracket
+            FROM games
+            WHERE eventid IN (SELECT eventid FROM events)
+            GROUP BY eventid
+        """).fetchall()
+
+        total_teams_row = conn.execute("SELECT COUNT(*) AS n FROM teams").fetchone()
+    finally:
+        conn.close()
+
+    counts_by_event = {str(r["eventid"]): r for r in game_counts}
+
+    event_list = []
+    total_games = 0
+    total_completed = 0
+    for e in events:
+        c = counts_by_event.get(str(e["eventid"]))
+        total = (c["total"] if c else 0) or 0
+        completed = (c["completed"] if c else 0) or 0
+        pool = (c["pool"] if c else 0) or 0
+        bracket = (c["bracket"] if c else 0) or 0
+        total_games += total
+        total_completed += completed
+        event_list.append({
+            "eventid": str(e["eventid"]),
+            "name": e["name"],
+            "status": e["status"],
+            "classification": e["classification"],
+            "start_date": e["start_date"],
+            "end_date": e["end_date"],
+            "total_games": total,
+            "completed_games": completed,
+            "pending_games": total - completed,
+            "pool_games": pool,
+            "bracket_games": bracket,
+        })
+
+    return {
+        "events": event_list,
+        "total_events": len(event_list),
+        "total_games": total_games,
+        "total_completed_games": total_completed,
+        "total_teams": (total_teams_row["n"] if total_teams_row else 0) or 0,
+    }

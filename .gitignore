@@ -22,6 +22,12 @@ deploy/
 # don't belong in source control regardless.
 *.exe
 
+# Local secrets -- TURSO_DATABASE_URL / TURSO_AUTH_TOKEN for running the
+# scraping pipeline against the hosted DB from this laptop. Never commit
+# real credentials; see .env.example for the format.
+.env
+.env.local
+
 # Editor / OS
 .vscode/
 .DS_Store

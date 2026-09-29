@@ -219,3 +219,27 @@ class ExplainGameResponse(BaseModel):
     pred_away_score: int
     pred_win_probability: int  # team_a's win %, for context
     factors: List[PredictionFactor]
+
+
+# ---------- Admin monitoring ----------
+
+class EventStatus(BaseModel):
+    eventid: str
+    name: str
+    status: Optional[str] = None
+    classification: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    total_games: int
+    completed_games: int
+    pending_games: int
+    pool_games: int
+    bracket_games: int
+
+
+class AdminStatusResponse(BaseModel):
+    events: List[EventStatus]
+    total_events: int
+    total_games: int
+    total_completed_games: int
+    total_teams: int

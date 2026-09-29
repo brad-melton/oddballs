@@ -11,6 +11,7 @@ from models import (
     PoolStandingsRequest, PoolStandingsResponse,
     ExplainGameRequest, ExplainGameResponse,
     ExplainPlacementRequest, ExplainPlacementResponse,
+    AdminStatusResponse,
 )
 
 app = FastAPI(title="Diamond Odds API")
@@ -121,3 +122,8 @@ def explain_placement(phase: str, req: ExplainPlacementRequest):
         raise HTTPException(status_code=501, detail=str(e))
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/admin/status", response_model=AdminStatusResponse)
+def admin_status():
+    return simulation.get_admin_status()

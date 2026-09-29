@@ -759,6 +759,8 @@ def phase_3b_populate_team_keys():
 # ==============================================================================
 
 def main():
+    import turso_sync
+
     print("\n" + "="*70)
     print("COMPREHENSIVE BASEBALL DATA PIPELINE")
     print("="*70)
@@ -766,6 +768,7 @@ def main():
     print("Phase 2: Enrich bracket data (pool vs bracket)")
     print("Phase 3A: Enrich teams table")
     print("Phase 3B: Populate team keys in games")
+    print("Phase 4: Sync new data to Turso" + ("" if turso_sync.enabled() else " (skipped -- not configured)"))
     print("\n" + "="*70 + "\n")
 
     try:
@@ -774,6 +777,11 @@ def main():
         phase_2_enrich_brackets()
         phase_3a_enrich_teams()
         phase_3b_populate_team_keys()
+
+        print("\n" + "="*70)
+        print("PHASE 4: SYNCING NEW DATA TO TURSO")
+        print("="*70 + "\n")
+        turso_sync.sync_to_turso()
 
         print("\n" + "="*70)
         print("ALL PHASES COMPLETE - DATA PIPELINE FINISHED SUCCESSFULLY")

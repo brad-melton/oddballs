@@ -23,10 +23,15 @@
     min-height: 100vh;
     padding-bottom: 48px;
   }
-  header { padding: 28px 20px 20px; text-align: center; border-bottom: 1px solid var(--line); }
+  header { padding: 28px 20px 20px; text-align: center; border-bottom: 1px solid var(--line); position: relative; }
   .brand { font-family: 'Teko', sans-serif; font-weight: 700; font-size: 42px; letter-spacing: 0.5px; display: flex; align-items: center; justify-content: center; gap: 10px; line-height: 1; }
   .brand .dot { color: var(--turf-bright); }
   .tagline { font-size: 13px; color: var(--chalk-dim); margin-top: 4px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .admin-link {
+    position: absolute; top: 28px; right: 20px; font-size: 12px; color: var(--chalk-dim);
+    text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px;
+  }
+  .admin-link:hover { color: var(--chalk); border-color: var(--turf-bright); }
   main { max-width: 480px; margin: 0 auto; padding: 20px 16px 0; }
   .card { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 18px; margin-bottom: 16px; }
   .card-label { font-size: 11px; font-weight: 700; letter-spacing: 0.08em; text-transform: uppercase; color: var(--chalk-dim); margin: 0 0 10px; display: flex; align-items: center; gap: 8px; }
@@ -394,3 +399,47 @@
   }
   .save-scores-btn:hover { background: var(--turf-bright); }
   .save-scores-btn:disabled { background: var(--surface-raised); color: var(--chalk-dim); cursor: default; }
+
+  /* ---------- admin page ---------- */
+  main.admin-main { display: block; max-width: 640px; }
+  @media (min-width: 900px) { main.admin-main { display: block; grid-template-columns: none; max-width: 640px; } }
+
+  .admin-code {
+    background: var(--ink); border: 1px solid var(--line); border-radius: 6px; padding: 10px 12px;
+    font-family: 'JetBrains Mono', monospace; font-size: 12.5px; color: var(--turf-bright);
+    overflow-x: auto; margin: 8px 0;
+  }
+  code { font-family: 'JetBrains Mono', monospace; font-size: 0.9em; color: var(--turf-bright); }
+
+  .admin-stat-grid { display: flex; flex-wrap: wrap; gap: 10px; }
+  .admin-stat {
+    flex: 1; min-width: 78px; display: flex; flex-direction: column; align-items: center; gap: 2px;
+    background: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 12px 8px;
+  }
+  .admin-stat-num { font-family: 'Teko', sans-serif; font-size: 30px; font-weight: 600; color: var(--turf-bright); line-height: 1; }
+  .admin-stat-label { font-size: 10px; color: var(--chalk-dim); text-transform: uppercase; letter-spacing: 0.05em; }
+
+  .admin-event-list { display: flex; flex-direction: column; gap: 8px; }
+  .admin-event-row {
+    background: var(--ink); border: 1px solid var(--line); border-radius: 8px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  .admin-event-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .admin-event-name { font-size: 13px; color: var(--chalk); }
+  .admin-event-meta { font-size: 11px; color: var(--chalk-dim); }
+  .admin-event-counts { font-size: 11px; color: var(--chalk-dim); font-family: 'JetBrains Mono', monospace; }
+
+  .admin-status-badge {
+    font-size: 9px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+    padding: 2px 7px; border-radius: 4px; flex-shrink: 0; border: 1px solid;
+  }
+  .status-complete { color: var(--turf-bright); border-color: var(--turf-bright); background: rgba(248,231,201,0.14); }
+  .status-upcoming { color: #8fc7ff; border-color: #8fc7ff; background: rgba(143,199,255,0.12); }
+  .status-ongoing { color: #ffd27a; border-color: #ffd27a; background: rgba(255,210,122,0.14); }
+  .status-scheduled { color: var(--chalk-dim); border-color: var(--line); background: rgba(185,210,198,0.08); }
+  .status-cancelled { color: var(--danger); border-color: var(--danger); background: rgba(217,105,90,0.12); }
+
+  .admin-progress-track {
+    height: 6px; border-radius: 3px; overflow: hidden; background: var(--surface-raised); border: 1px solid var(--line);
+  }
+  .admin-progress-fill { height: 100%; background: var(--turf); }
