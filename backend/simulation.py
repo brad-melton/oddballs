@@ -1056,11 +1056,11 @@ def update_event_status(eventid: str, status: str) -> dict:
 
     conn = _get_connection()
     try:
-        row = conn.execute("SELECT eventid FROM events WHERE eventid = ?", [eventid]).fetchone()
+        row = conn.execute("SELECT eventid FROM events WHERE eventid = ?", (eventid,)).fetchone()
         if row is None:
             raise ValueError(f"Event {eventid} not found")
 
-        conn.execute("UPDATE events SET status = ? WHERE eventid = ?", [status, eventid])
+        conn.execute("UPDATE events SET status = ? WHERE eventid = ?", (status, eventid))
         conn.commit()
     finally:
         conn.close()
