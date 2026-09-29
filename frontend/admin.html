@@ -25,29 +25,61 @@
   </div>
 
   <div class="card">
-    <p class="card-label">Adding new data</p>
-    <p class="placeholder-note" style="text-align:left; padding:0;">
-      This page only monitors — it can't reach out and run a scrape by itself.
-      From your laptop, with <code>.env.local</code> configured (see
-      <code>.env.example</code>), run:
-    </p>
-    <pre class="admin-code">python fall2026catchupscoring.py</pre>
-    <p class="placeholder-note" style="text-align:left; padding:0;">
-      That scrapes new games locally, then pushes them into this same hosted
-      database as its last step. Already-final scores and team links already
-      set here are never overwritten by a rescrape — only filled in if still
-      empty. Refresh this page afterward to see the update.
-    </p>
+    <p class="card-label">Filter</p>
+    <div class="admin-filter-group">
+      <p class="admin-filter-label">Status</p>
+      <div class="admin-status-pills" id="statusFilters"></div>
+    </div>
+    <div class="admin-filter-group">
+      <p class="admin-filter-label">Start date</p>
+      <div class="admin-filter-row">
+        <input type="date" class="admin-date-input" id="dateFrom">
+        <span class="admin-filter-sep">to</span>
+        <input type="date" class="admin-date-input" id="dateTo">
+      </div>
+    </div>
+    <div class="admin-filter-group">
+      <p class="admin-filter-label">% games scraped</p>
+      <div class="admin-filter-row">
+        <input type="number" class="admin-pct-input" id="pctFrom" min="0" max="100" placeholder="0">
+        <span class="admin-filter-sep">–</span>
+        <input type="number" class="admin-pct-input" id="pctTo" min="0" max="100" placeholder="100">
+        <span class="admin-filter-sep">%</span>
+        <button class="mode-tab" id="clearFiltersBtn" style="padding:6px 14px; margin-left:auto;">Clear</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="card" id="selectedEventCard" style="display:none;">
+    <p class="card-label">Selected event</p>
+    <div id="selectedEventContent"></div>
   </div>
 
   <div class="card">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
-      <p class="card-label" style="margin:0;">Events</p>
+      <p class="card-label" style="margin:0;">Events <span id="eventCountLabel"></span></p>
       <button class="mode-tab" id="refreshBtn" style="padding:6px 14px;">↻ Refresh</button>
     </div>
     <div class="admin-event-list" id="adminEventList">
       <p class="placeholder-note">Loading…</p>
     </div>
+  </div>
+
+  <div class="card">
+    <p class="card-label">Adding new data</p>
+    <p class="placeholder-note" style="text-align:left; padding:0;">
+      This page only monitors — it can't reach out and run a scrape by itself.
+      From your laptop, with <code>.env.local</code> configured (see
+      <code>.env.example</code>), run the command shown above once an event
+      is selected (targets just that event), or run the full pipeline:
+    </p>
+    <pre class="admin-code">python fall2026catchupscoring.py</pre>
+    <p class="placeholder-note" style="text-align:left; padding:0;">
+      Either way, it scrapes locally then pushes into this same hosted
+      database as its last step. Already-final scores and team links here
+      are never overwritten by a rescrape — only filled in if still empty.
+      Refresh this page afterward to see the update.
+    </p>
   </div>
 </main>
 

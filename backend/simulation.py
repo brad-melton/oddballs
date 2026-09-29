@@ -1042,3 +1042,27 @@ def get_admin_status() -> dict:
         "total_completed_games": total_completed,
         "total_teams": (total_teams_row["n"] if total_teams_row else 0) or 0,
     }
+
+
+# The distinct values actually seen in the events table's status column.
+VALID_EVENT_STATUSES = ("complete", "upcoming", "ongoing", "scheduled", "cancelled")
+
+
+def update_event_status(eventid: str, status: str) -> dict:
+    """Admin page action: changes one event's status. Writes through
+    db.py the same as everything else, so this lands on Turso in prod."""
+    if status not in VALID_EVENT_STATUSES:
+        raise ValueError(f"Unknown status '{status}', expected one of {VALID_EVENT_STATUSES}")
+
+    conn = _get_connection()
+    try:
+        row = conn.execute("SELECT eventid FROM events WHERE eventid = ?", [eventid]).fetchone()
+        if row is None:
+            raise ValueError(f"Event {eventid} not found")
+
+        conn.execute("UPDATE events SET status = ? WHERE eventid = ?", [status, eventid])
+        conn.commit()
+    finally:
+        conn.close()
+
+    return {"eventid": str(eventid), "status": status}

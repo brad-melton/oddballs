@@ -243,3 +243,12 @@ class AdminStatusResponse(BaseModel):
     total_games: int
     total_completed_games: int
     total_teams: int
+
+
+class UpdateEventStatusRequest(BaseModel):
+    status: str
+
+
+class UpdateEventStatusResponse(BaseModel):
+    eventid: str
+    status: str

@@ -265,8 +265,14 @@ def insert_games_to_db(games_list, db_path):
         logging.error(f"Failed to insert games: {e}")
 
 
-def phase_1_scrape_games():
-    """PHASE 1: Scrape games from Perfect Game tournament pages"""
+def phase_1_scrape_games(event_id=None):
+    """
+    PHASE 1: Scrape games from Perfect Game tournament pages.
+
+    event_id: if given, scrapes only that one event regardless of its
+    status (used for the admin page's "scrape this event" action, which
+    targets a single event rather than the whole complete/upcoming set).
+    """
     print("\n" + "="*70)
     print("PHASE 1: SCRAPING GAMES FROM PERFECT GAME")
     print("="*70 + "\n")
@@ -276,21 +282,28 @@ def phase_1_scrape_games():
             conn.row_factory = sqlite3.Row
             cursor = conn.cursor()
 
-            # Query complete events
-            query = """
-                SELECT eventid, name, age, start_date, end_date, classification
-                FROM events
-                WHERE status in ('complete', 'upcoming')
-                ORDER BY eventid
-            """
+            if event_id:
+                query = """
+                    SELECT eventid, name, age, start_date, end_date, classification
+                    FROM events
+                    WHERE eventid = ?
+                """
+                cursor.execute(query, (event_id,))
+            else:
+                query = """
+                    SELECT eventid, name, age, start_date, end_date, classification
+                    FROM events
+                    WHERE status in ('complete', 'upcoming')
+                    ORDER BY eventid
+                """
+                cursor.execute(query)
 
-            cursor.execute(query)
             events = cursor.fetchall()
 
-            print(f"Found {len(events)} complete events to process.\n")
+            print(f"Found {len(events)} event(s) to process.\n")
 
             if not events:
-                print("No complete or upcoming events found.")
+                print("No matching events found.")
                 return
 
             # Process each event
@@ -419,8 +432,14 @@ def extract_seeds_from_table(table, home_team, away_team):
     return home_seed, visitor_seed
 
 
-def phase_2_enrich_brackets():
-    """PHASE 2: Enrich bracket data (pool vs bracket determination)"""
+def phase_2_enrich_brackets(event_id=None):
+    """
+    PHASE 2: Enrich bracket data (pool vs bracket determination).
+
+    event_id: if given, scopes to just that event's bracket games instead
+    of the whole complete/upcoming set (paired with phase_1's same param
+    for the admin page's single-event scrape).
+    """
     print("\n" + "="*70)
     print("PHASE 2: ENRICHING BRACKET DATA")
     print("="*70 + "\n")
@@ -432,9 +451,17 @@ def phase_2_enrich_brackets():
         # format is already set in Phase 1 (first day of event = pool, otherwise bracket);
         # bracketurl is only ever populated for bracket-format games, so every row returned
         # here is already known to be a bracket game. Scoped to this pipeline's own events
-        # (status complete/upcoming) -- games.bracketurl is not unique to this pipeline, and
-        # an unscoped query here will also pick up unrelated rows from other data sources.
-        cur.execute("""
+        # (status complete/upcoming, or just event_id when given) -- games.bracketurl is not
+        # unique to this pipeline, and an unscoped query here will also pick up unrelated
+        # rows from other data sources.
+        if event_id:
+            scope_sql = "g.eventid = ?"
+            scope_params = (event_id,)
+        else:
+            scope_sql = "g.eventid IN (SELECT eventid FROM events WHERE status IN ('complete', 'upcoming'))"
+            scope_params = ()
+
+        cur.execute(f"""
             SELECT
                 g.id,
                 g.game_num,
@@ -445,9 +472,9 @@ def phase_2_enrich_brackets():
                 g.game_date
             FROM games g
             WHERE g.bracketurl IS NOT NULL AND g.bracketurl <> ''
-            AND g.eventid IN (SELECT eventid FROM events WHERE status IN ('complete', 'upcoming'))
+            AND {scope_sql}
             ORDER BY g.id
-        """)
+        """, scope_params)
 
         games = cur.fetchall()
         print(f"Found {len(games)} games with bracket URLs.\n")
@@ -758,13 +785,16 @@ def phase_3b_populate_team_keys():
 # MAIN ORCHESTRATION
 # ==============================================================================
 
-def main():
+def main(event_id=None):
     import turso_sync
 
     print("\n" + "="*70)
     print("COMPREHENSIVE BASEBALL DATA PIPELINE")
     print("="*70)
-    print("\nPhase 1: Scrape games from Perfect Game")
+    if event_id:
+        print(f"\nScraping ONLY event {event_id} (--event given)")
+    else:
+        print("\nPhase 1: Scrape games from Perfect Game")
     print("Phase 2: Enrich bracket data (pool vs bracket)")
     print("Phase 3A: Enrich teams table")
     print("Phase 3B: Populate team keys in games")
@@ -773,8 +803,8 @@ def main():
 
     try:
         # Run all phases
-        phase_1_scrape_games()
-        phase_2_enrich_brackets()
+        phase_1_scrape_games(event_id=event_id)
+        phase_2_enrich_brackets(event_id=event_id)
         phase_3a_enrich_teams()
         phase_3b_populate_team_keys()
 
@@ -809,4 +839,14 @@ def main():
 
 
 if __name__ == "__main__":
-    main()
+    import argparse
+
+    parser = argparse.ArgumentParser(description="Fall 2026 catchup scoring pipeline")
+    parser.add_argument(
+        "--event", type=str, default=None,
+        help="Scrape only this eventid (any status) instead of every complete/upcoming event. "
+             "Used by the admin page's 'scrape this event' action.",
+    )
+    args = parser.parse_args()
+
+    main(event_id=args.event)
