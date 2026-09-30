@@ -27,8 +27,9 @@
   .brand { font-family: 'Teko', sans-serif; font-weight: 700; font-size: 42px; letter-spacing: 0.5px; display: flex; align-items: center; justify-content: center; gap: 10px; line-height: 1; }
   .brand .dot { color: var(--turf-bright); }
   .tagline { font-size: 13px; color: var(--chalk-dim); margin-top: 4px; letter-spacing: 0.04em; text-transform: uppercase; }
+  .nav-links { position: absolute; top: 28px; right: 20px; display: flex; gap: 8px; }
   .admin-link {
-    position: absolute; top: 28px; right: 20px; font-size: 12px; color: var(--chalk-dim);
+    font-size: 12px; color: var(--chalk-dim);
     text-decoration: none; border: 1px solid var(--line); border-radius: 999px; padding: 5px 12px;
   }
   .admin-link:hover { color: var(--chalk); border-color: var(--turf-bright); }
@@ -148,6 +149,8 @@
   table.roster th { text-align: left; color: var(--chalk-dim); font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em; padding: 6px 8px; border-bottom: 1px solid var(--line); }
   table.roster td { padding: 8px; border-bottom: 1px solid var(--line); font-family: 'JetBrains Mono', monospace; }
   table.roster td.name-cell { font-family: 'Inter', sans-serif; font-weight: 500; }
+  table.roster tr.scouting-row { cursor: pointer; }
+  table.roster tr.scouting-row:hover td { background: rgba(248,231,201,0.08); }
 
   @media (min-width: 780px) {
     main { max-width: 900px; display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }

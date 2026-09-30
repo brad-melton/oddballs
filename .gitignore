@@ -28,6 +28,17 @@ deploy/
 .env
 .env.local
 
+# GameChanger scraper session/login artifacts -- gc_storage_state.json is a
+# live session credential, .gc_login_profile/ is a real Chrome profile
+# (cookies, local storage) used only for the --login flow. See
+# gamechanger_scrape.py.
+gc_storage_state.json
+.gc_login_profile/
+
+# Real GameChanger data captured during development/recon -- not needed
+# once its shape has been coded against, and may contain real player names.
+sample boxscore.json
+
 # Editor / OS
 .vscode/
 .DS_Store

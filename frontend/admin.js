@@ -233,3 +233,96 @@ async function saveEventStatus(eventid) {
 
 document.getElementById('refreshBtn').addEventListener('click', loadAdminStatus);
 loadAdminStatus();
+
+/* ---------- GameChanger team links ---------- */
+async function loadGcMappings() {
+  const el = document.getElementById('gcMappingList');
+  el.innerHTML = `<p class="placeholder-note">Loading…</p>`;
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/scouting/team-mappings`);
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const data = await res.json();
+    renderGcMappings(data.mappings);
+  } catch (err) {
+    el.innerHTML = `<p class="placeholder-note">Couldn't load (${err.message}). Is the API running at <code>${API_BASE}</code>?</p>`;
+  }
+}
+
+function renderGcMappings(mappings) {
+  const el = document.getElementById('gcMappingList');
+  if (mappings.length === 0) {
+    el.innerHTML = `<p class="placeholder-note">No GameChanger teams scraped yet.</p>`;
+    return;
+  }
+
+  el.innerHTML = mappings.map((m, i) => `
+    <div class="admin-event-row">
+      <div class="admin-event-top">
+        <span class="admin-event-name">${m.gc_team_name || m.gc_team_id}</span>
+        ${m.pg_team_name
+          ? `<span class="admin-status-badge status-complete">→ ${m.pg_team_name}</span>`
+          : `<span class="admin-status-badge status-scheduled">unlinked</span>`}
+      </div>
+      ${m.last_scraped ? `<div class="admin-event-meta">Last scraped: ${m.last_scraped.split('T')[0]}</div>` : ''}
+      ${!m.pg_team_name ? `
+        <div class="admin-filter-row" style="margin-top:8px;">
+          <input type="text" class="select-input" id="gcMapSearch${i}" placeholder="Search PG team to link…" style="flex:1; padding:8px 10px; font-size:12px;">
+        </div>
+        <div id="gcMapResults${i}"></div>
+        <p class="placeholder-note" id="gcMapNote${i}" style="text-align:left; padding:4px 0 0; font-size:11px;"></p>
+      ` : ''}
+    </div>
+  `).join('');
+
+  mappings.forEach((m, i) => {
+    if (m.pg_team_name) return;
+    const input = document.getElementById(`gcMapSearch${i}`);
+    let debounceTimer;
+    input.addEventListener('input', () => {
+      clearTimeout(debounceTimer);
+      const q = input.value.trim();
+      debounceTimer = setTimeout(() => searchPgTeamsForMapping(q, m.gc_team_id, i), 250);
+    });
+  });
+}
+
+async function searchPgTeamsForMapping(query, gcTeamId, i) {
+  const resultsEl = document.getElementById(`gcMapResults${i}`);
+  if (!query) { resultsEl.innerHTML = ''; return; }
+  try {
+    const res = await fetch(`${API_BASE}/api/scouting/teams?query=${encodeURIComponent(query)}`);
+    if (!res.ok) throw new Error(`Server responded ${res.status}`);
+    const teams = await res.json();
+    resultsEl.innerHTML = teams.slice(0, 8).map(t =>
+      `<button class="mode-tab" data-team-key="${t.team_key}" style="padding:6px 12px; margin:6px 6px 0 0; font-size:12px;">${t.team_name}</button>`
+    ).join('') || `<p class="placeholder-note" style="padding:4px 0; text-align:left;">No matches.</p>`;
+    resultsEl.querySelectorAll('button[data-team-key]').forEach(btn => {
+      btn.addEventListener('click', () => linkGcTeam(gcTeamId, Number(btn.dataset.teamKey), i));
+    });
+  } catch (err) {
+    resultsEl.innerHTML = `<p class="placeholder-note" style="text-align:left;">Search failed (${err.message}).</p>`;
+  }
+}
+
+async function linkGcTeam(gcTeamId, pgTeamKey, i) {
+  const note = document.getElementById(`gcMapNote${i}`);
+  note.textContent = 'Linking…';
+  try {
+    const res = await fetch(`${API_BASE}/api/admin/scouting/team-mappings`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ pg_team_key: pgTeamKey, gc_team_id: gcTeamId }),
+    });
+    if (!res.ok) {
+      let detail = `Server responded ${res.status}`;
+      try { const errBody = await res.json(); if (errBody.detail) detail = errBody.detail; } catch {}
+      throw new Error(detail);
+    }
+    loadGcMappings();
+  } catch (err) {
+    note.textContent = `Couldn't link (${err.message}).`;
+  }
+}
+
+document.getElementById('refreshMappingsBtn').addEventListener('click', loadGcMappings);
+loadGcMappings();

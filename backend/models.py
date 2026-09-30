@@ -252,3 +252,97 @@ class UpdateEventStatusRequest(BaseModel):
 class UpdateEventStatusResponse(BaseModel):
     eventid: str
     status: str
+
+
+# ---------- Scouting report (Phase A -- see gamechanger_scrape.py) ----------
+
+class ScoutingTeamSearchResult(BaseModel):
+    team_key: int
+    team_name: str
+    gc_linked: bool
+    last_scraped: Optional[str] = None
+
+
+class TeamScoutingRosterRow(BaseModel):
+    player_name: str
+    games_played: int
+    avg: Optional[float] = None
+    hr: int
+    rbi: int
+    ip: Optional[str] = None
+    era: Optional[float] = None
+    so_pitching: int
+
+
+class TeamScoutingReportResponse(BaseModel):
+    team_key: int
+    team_name: str
+    last_scraped: Optional[str] = None
+    roster: List[TeamScoutingRosterRow]
+
+
+class PlayerBattingLine(BaseModel):
+    game_date: Optional[str] = None
+    opponent: Optional[str] = None
+    ab: int
+    r: int
+    h: int
+    doubles: int
+    triples: int
+    hr: int
+    rbi: int
+    bb: int
+    so: int
+    sb: int
+
+
+class PlayerPitchingLine(BaseModel):
+    game_date: Optional[str] = None
+    opponent: Optional[str] = None
+    ip: str
+    h: int
+    r: int
+    er: int
+    bb: int
+    so: int
+    pitches: Optional[int] = None
+
+
+class PlayerFieldingLine(BaseModel):
+    game_date: Optional[str] = None
+    opponent: Optional[str] = None
+    errors: int
+
+
+class PlayerScoutingProfileResponse(BaseModel):
+    player_name: str
+    jersey_number: Optional[str] = None
+    batting_log: List[PlayerBattingLine]
+    batting_totals: dict
+    pitching_log: List[PlayerPitchingLine]
+    pitching_totals: dict
+    fielding_log: List[PlayerFieldingLine]
+
+
+class MapGcTeamRequest(BaseModel):
+    pg_team_key: int
+    gc_team_id: Optional[str] = None
+    gc_url: Optional[str] = None
+
+
+class MapGcTeamResponse(BaseModel):
+    gc_team_id: str
+    pg_team_key: int
+
+
+class GcTeamMapping(BaseModel):
+    gc_team_id: str
+    gc_team_name: Optional[str] = None
+    gc_url: Optional[str] = None
+    pg_team_key: Optional[int] = None
+    pg_team_name: Optional[str] = None
+    last_scraped: Optional[str] = None
+
+
+class GcTeamMappingListResponse(BaseModel):
+    mappings: List[GcTeamMapping]

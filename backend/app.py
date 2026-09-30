@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
 import simulation
+import scouting
 from models import (
     TournamentListResponse,
     PopulateGamesRequest, PopulateGamesResponse,
@@ -13,6 +14,8 @@ from models import (
     ExplainPlacementRequest, ExplainPlacementResponse,
     AdminStatusResponse,
     UpdateEventStatusRequest, UpdateEventStatusResponse,
+    ScoutingTeamSearchResult, TeamScoutingReportResponse, PlayerScoutingProfileResponse,
+    MapGcTeamRequest, MapGcTeamResponse, GcTeamMappingListResponse,
 )
 
 app = FastAPI(title="Diamond Odds API")
@@ -36,6 +39,13 @@ app.add_middleware(
 def _check_phase(phase: str):
     if phase not in VALID_PHASES:
         raise HTTPException(status_code=404, detail=f"Unknown phase '{phase}', expected one of {VALID_PHASES}")
+
+
+@app.on_event("startup")
+def _startup():
+    # So a scouting-report lookup doesn't 404 on "no such table" against a
+    # fresh Turso database before gamechanger_scrape.py has ever run.
+    scouting.ensure_scouting_schema()
 
 
 @app.get("/health")
@@ -134,5 +144,39 @@ def admin_status():
 def admin_update_event_status(eventid: str, req: UpdateEventStatusRequest):
     try:
         return simulation.update_event_status(eventid, req.status)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/scouting/teams", response_model=list[ScoutingTeamSearchResult])
+def scouting_team_search(query: str = ""):
+    return scouting.search_scouting_teams(query)
+
+
+@app.get("/api/scouting/team/{team_key}", response_model=TeamScoutingReportResponse)
+def scouting_team_report(team_key: int):
+    try:
+        return scouting.get_team_scouting_report(team_key)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/scouting/team/{team_key}/player/{player_name}", response_model=PlayerScoutingProfileResponse)
+def scouting_player_profile(team_key: int, player_name: str):
+    try:
+        return scouting.get_player_scouting_profile(team_key, player_name)
+    except ValueError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+
+
+@app.get("/api/admin/scouting/team-mappings", response_model=GcTeamMappingListResponse)
+def admin_scouting_team_mappings():
+    return {"mappings": scouting.list_gc_team_mappings()}
+
+
+@app.post("/api/admin/scouting/team-mappings", response_model=MapGcTeamResponse)
+def admin_map_gc_team(req: MapGcTeamRequest):
+    try:
+        return scouting.map_gc_team(req.pg_team_key, gc_team_id=req.gc_team_id, gc_url=req.gc_url)
     except ValueError as e:
         raise HTTPException(status_code=404, detail=str(e))

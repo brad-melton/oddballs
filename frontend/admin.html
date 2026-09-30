@@ -13,7 +13,10 @@
 <header>
   <div class="brand">⚾ DIAMOND<span class="dot">·</span>ODDS</div>
   <div class="tagline">Data status &amp; admin</div>
-  <a href="index.html" class="admin-link">← App</a>
+  <div class="nav-links">
+    <a href="index.html" class="admin-link">App</a>
+    <a href="scouting.html" class="admin-link">Scouting</a>
+  </div>
 </header>
 
 <main class="admin-main">
@@ -80,6 +83,19 @@
       are never overwritten by a rescrape — only filled in if still empty.
       Refresh this page afterward to see the update.
     </p>
+  </div>
+
+  <div class="card">
+    <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
+      <p class="card-label" style="margin:0;">GameChanger team links</p>
+      <button class="mode-tab" id="refreshMappingsBtn" style="padding:6px 14px;">↻ Refresh</button>
+    </div>
+    <p class="placeholder-note" style="text-align:left; padding:0 0 12px;">
+      Links a scraped GameChanger team to an existing Perfect Game team so its
+      stats show up on the <a href="scouting.html" class="admin-link" style="position:static; display:inline;">Scouting</a> page.
+      Scrape a team first with <code>gamechanger_scrape.py --team-url ...</code>, then map it here.
+    </p>
+    <div id="gcMappingList"><p class="placeholder-note">Loading…</p></div>
   </div>
 </main>
 

@@ -64,25 +64,48 @@ _GAME_COLUMNS = [
     "home_seed", "visitor_seed",
 ]
 
+# GameChanger scouting tables -- see gamechanger_scrape.py's module docstring
+# for why these are keyed by GC's own external ids rather than a local
+# autoincrement surrogate: it means every one of these syncs the same
+# natural-key way _sync_teams/_sync_games above already do, with no risk of
+# a local row id mismatching Turso's own independently-assigned one.
+_GC_TEAM_COLUMNS = ["gc_team_id", "gc_url", "gc_team_name", "pg_team_key", "season", "last_scraped"]
+_GC_PLAYER_COLUMNS = ["gc_player_id", "gc_team_id", "player_name", "jersey_number", "first_seen_date", "last_seen_date"]
+_GC_GAME_COLUMNS = [
+    "gc_game_id", "gc_team_id", "game_date", "opponent_name", "opponent_id", "home_away",
+    "final_score_for", "final_score_against", "boxscore_url", "pg_game_id", "pg_eventid",
+    "match_method", "last_scraped",
+]
+_GC_BATTING_COLUMNS = ["gc_game_id", "gc_player_id", "ab", "r", "h", "doubles", "triples", "hr",
+                       "rbi", "bb", "so", "sb", "hbp", "sf", "sh"]
+_GC_PITCHING_COLUMNS = ["team_key", "player_name", "game_date", "gc_game_id", "gc_player_id",
+                        "ip_outs", "h", "r", "er", "bb", "so", "hr", "pitches", "source",
+                        "entered_by", "entered_at", "notes"]
+_GC_FIELDING_COLUMNS = ["gc_game_id", "gc_player_id", "errors"]
+
 
 def enabled() -> bool:
     return bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
 
 
-def sync_to_turso(verbose: bool = True, event_id: str = None) -> dict:
+def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = None) -> dict:
     """
     Pushes events / teams / games from the local sqlite file into Turso.
     No-ops (returns {"synced": False}) if Turso isn't configured.
 
-    With event_id given (matching --event on the pipeline), scopes all
-    three syncs to just that event instead of the whole local database --
-    a full sync re-pushes every event/team/game every run regardless of
-    what actually changed (confirmed: ~248 event calls + ~607 team calls
-    + one call per already-existing game, ~6,000+ round trips total even
-    when only one event's worth of games actually changed), which is fine
-    on wifi but can take tens of minutes on a slower/higher-latency
-    connection like a phone hotspot for what should be a quick single-
-    event rescrape.
+    With event_id given (matching --event on the pipeline), scopes the PG
+    syncs to just that event instead of the whole local database -- a full
+    sync re-pushes every event/team/game every run regardless of what
+    actually changed (confirmed: ~248 event calls + ~607 team calls + one
+    call per already-existing game, ~6,000+ round trips total even when only
+    one event's worth of games actually changed), which is fine on wifi but
+    can take tens of minutes on a slower/higher-latency connection like a
+    phone hotspot for what should be a quick single-event rescrape.
+
+    With gc_team_id given (matching a gamechanger_scrape.py run), scopes the
+    GameChanger syncs to just that team's games/stats the same way -- GC
+    scrapes are per-team, not per-event, so this is a separate scope
+    parameter from event_id, not a reuse of it.
     """
     if not enabled():
         if verbose:
@@ -96,9 +119,16 @@ def sync_to_turso(verbose: bool = True, event_id: str = None) -> dict:
     remote = turso_serverless.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
 
     try:
+        _ensure_remote_gc_schema(remote)
         events_synced = _sync_events(local, remote, event_id)
         teams_synced = _sync_teams(local, remote, event_id)
         games_inserted, games_updated = _sync_games(local, remote, event_id)
+        gc_teams_synced = _sync_gc_teams(local, remote, gc_team_id)
+        gc_players_synced = _sync_gc_players(local, remote, gc_team_id)
+        gc_games_synced = _sync_gc_games(local, remote, gc_team_id)
+        gc_batting_synced = _sync_gc_batting(local, remote, gc_team_id)
+        gc_pitching_synced = _sync_gc_pitching(local, remote, gc_team_id)
+        gc_fielding_synced = _sync_gc_fielding(local, remote, gc_team_id)
         remote.commit()
     finally:
         local.close()
@@ -110,6 +140,12 @@ def sync_to_turso(verbose: bool = True, event_id: str = None) -> dict:
         "teams_synced": teams_synced,
         "games_inserted": games_inserted,
         "games_updated": games_updated,
+        "gc_teams_synced": gc_teams_synced,
+        "gc_players_synced": gc_players_synced,
+        "gc_games_synced": gc_games_synced,
+        "gc_batting_synced": gc_batting_synced,
+        "gc_pitching_synced": gc_pitching_synced,
+        "gc_fielding_synced": gc_fielding_synced,
     }
     if verbose:
         print(f"Turso sync complete: {summary}")
@@ -251,6 +287,198 @@ def _sync_games(local, remote, event_id: str = None) -> tuple[int, int]:
                 updated += 1
 
     return inserted, updated
+
+
+# ==============================================================================
+# GAMECHANGER SCOUTING TABLES
+# ==============================================================================
+
+_GC_SCHEMA_STATEMENTS = [
+    """CREATE TABLE IF NOT EXISTS gc_teams (
+        gc_team_id TEXT PRIMARY KEY, gc_url TEXT, gc_team_name TEXT,
+        pg_team_key INTEGER, season TEXT, last_scraped TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS gc_players (
+        gc_player_id TEXT PRIMARY KEY, gc_team_id TEXT, player_name TEXT,
+        jersey_number TEXT, first_seen_date TEXT, last_seen_date TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS gc_games (
+        gc_game_id TEXT PRIMARY KEY, gc_team_id TEXT, game_date TEXT,
+        opponent_name TEXT, opponent_id TEXT, home_away TEXT,
+        final_score_for INTEGER, final_score_against INTEGER, boxscore_url TEXT,
+        pg_game_id INTEGER, pg_eventid TEXT, match_method TEXT, last_scraped TEXT
+    )""",
+    """CREATE TABLE IF NOT EXISTS gc_batting_stats (
+        gc_game_id TEXT, gc_player_id TEXT,
+        ab INTEGER, r INTEGER, h INTEGER, doubles INTEGER, triples INTEGER, hr INTEGER,
+        rbi INTEGER, bb INTEGER, so INTEGER, sb INTEGER, hbp INTEGER, sf INTEGER, sh INTEGER,
+        PRIMARY KEY (gc_game_id, gc_player_id)
+    )""",
+    """CREATE TABLE IF NOT EXISTS gc_pitching_stats (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, team_key INTEGER,
+        player_name TEXT NOT NULL, game_date TEXT NOT NULL,
+        gc_game_id TEXT, gc_player_id TEXT,
+        ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
+        pitches INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
+        entered_by TEXT, entered_at TEXT, notes TEXT,
+        UNIQUE(gc_game_id, gc_player_id), UNIQUE(team_key, player_name, game_date, source)
+    )""",
+    """CREATE TABLE IF NOT EXISTS gc_fielding_stats (
+        gc_game_id TEXT, gc_player_id TEXT, errors INTEGER,
+        PRIMARY KEY (gc_game_id, gc_player_id)
+    )""",
+]
+
+
+def _ensure_remote_gc_schema(remote):
+    """Turso needs these tables created once too -- unlike events/teams/games,
+    they don't already exist there from an earlier manual setup."""
+    for stmt in _GC_SCHEMA_STATEMENTS:
+        _retry(lambda stmt=stmt: remote.execute(stmt))
+
+
+def _sync_gc_teams(local, remote, gc_team_id: str = None) -> int:
+    """With gc_team_id given, also carries along any opponent teams it has
+    played (auto-created gc_teams rows keyed by their GC opponent id) --
+    otherwise a scoped sync would push the team itself but strand its
+    opponents' names/mappings on Turso."""
+    cols = _GC_TEAM_COLUMNS
+    if gc_team_id:
+        rows = local.execute(
+            f"""SELECT {', '.join(cols)} FROM gc_teams
+                WHERE gc_team_id = ? OR gc_team_id IN (
+                    SELECT DISTINCT opponent_id FROM gc_games WHERE gc_team_id = ?
+                )""",
+            (gc_team_id, gc_team_id),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_teams").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_teams ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_team_id) DO UPDATE SET
+                  gc_team_name=excluded.gc_team_name, last_scraped=excluded.last_scraped,
+                  gc_url=COALESCE(excluded.gc_url, gc_teams.gc_url),
+                  pg_team_key=COALESCE(excluded.pg_team_key, gc_teams.pg_team_key)""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
+
+
+def _sync_gc_players(local, remote, gc_team_id: str = None) -> int:
+    cols = _GC_PLAYER_COLUMNS
+    if gc_team_id:
+        rows = local.execute(
+            f"""SELECT {', '.join(cols)} FROM gc_players
+                WHERE gc_team_id = ? OR gc_team_id IN (
+                    SELECT DISTINCT opponent_id FROM gc_games WHERE gc_team_id = ?
+                )""",
+            (gc_team_id, gc_team_id),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_players").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_players ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_player_id) DO UPDATE SET
+                  player_name=excluded.player_name, last_seen_date=excluded.last_seen_date,
+                  gc_team_id=COALESCE(excluded.gc_team_id, gc_players.gc_team_id),
+                  jersey_number=COALESCE(excluded.jersey_number, gc_players.jersey_number)""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
+
+
+def _sync_gc_games(local, remote, gc_team_id: str = None) -> int:
+    cols = _GC_GAME_COLUMNS
+    if gc_team_id:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_games WHERE gc_team_id = ?", (gc_team_id,)).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_games").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_games ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_game_id) DO UPDATE SET
+                  game_date=excluded.game_date, opponent_name=excluded.opponent_name,
+                  opponent_id=excluded.opponent_id, home_away=excluded.home_away,
+                  final_score_for=COALESCE(excluded.final_score_for, gc_games.final_score_for),
+                  final_score_against=COALESCE(excluded.final_score_against, gc_games.final_score_against),
+                  boxscore_url=COALESCE(excluded.boxscore_url, gc_games.boxscore_url),
+                  pg_eventid=COALESCE(excluded.pg_eventid, gc_games.pg_eventid),
+                  last_scraped=excluded.last_scraped""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
+
+
+def _sync_gc_batting(local, remote, gc_team_id: str = None) -> int:
+    cols = _GC_BATTING_COLUMNS
+    if gc_team_id:
+        rows = local.execute(
+            f"""SELECT {', '.join(cols)} FROM gc_batting_stats
+                WHERE gc_game_id IN (SELECT gc_game_id FROM gc_games WHERE gc_team_id = ?)""",
+            (gc_team_id,),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_batting_stats").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_batting_stats ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
+                  ab=excluded.ab, r=excluded.r, h=excluded.h, doubles=excluded.doubles,
+                  triples=excluded.triples, hr=excluded.hr, rbi=excluded.rbi, bb=excluded.bb,
+                  so=excluded.so, sb=excluded.sb, hbp=excluded.hbp, sf=excluded.sf, sh=excluded.sh""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
+
+
+def _sync_gc_pitching(local, remote, gc_team_id: str = None) -> int:
+    """Only pushes source='scraped' rows -- manual entries are written
+    directly to the live Turso database by the backend and never exist
+    locally, so there's nothing to push, and nothing at risk of being
+    overwritten: a manual row's key never collides with a scraped row's,
+    since source is part of both tables' uniqueness constraint."""
+    cols = _GC_PITCHING_COLUMNS
+    if gc_team_id:
+        rows = local.execute(
+            f"""SELECT {', '.join(cols)} FROM gc_pitching_stats
+                WHERE source = 'scraped' AND gc_game_id IN (
+                    SELECT gc_game_id FROM gc_games WHERE gc_team_id = ?
+                )""",
+            (gc_team_id,),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_pitching_stats WHERE source = 'scraped'").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_pitching_stats ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
+                  team_key=excluded.team_key, player_name=excluded.player_name, game_date=excluded.game_date,
+                  ip_outs=excluded.ip_outs, h=excluded.h, r=excluded.r, er=excluded.er, bb=excluded.bb,
+                  so=excluded.so, hr=excluded.hr, pitches=excluded.pitches""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
+
+
+def _sync_gc_fielding(local, remote, gc_team_id: str = None) -> int:
+    cols = _GC_FIELDING_COLUMNS
+    if gc_team_id:
+        rows = local.execute(
+            f"""SELECT {', '.join(cols)} FROM gc_fielding_stats
+                WHERE gc_game_id IN (SELECT gc_game_id FROM gc_games WHERE gc_team_id = ?)""",
+            (gc_team_id,),
+        ).fetchall()
+    else:
+        rows = local.execute(f"SELECT {', '.join(cols)} FROM gc_fielding_stats").fetchall()
+    for row in rows:
+        _retry(lambda row=row: remote.execute(
+            f"""INSERT INTO gc_fielding_stats ({', '.join(cols)}) VALUES ({', '.join(['?'] * len(cols))})
+                ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET errors=excluded.errors""",
+            [row[c] for c in cols],
+        ))
+    return len(rows)
 
 
 if __name__ == "__main__":
