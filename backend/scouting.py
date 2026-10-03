@@ -129,14 +129,15 @@ BADGE_HIGH_BB = "\U0001F441️"  # plate discipline / walks
 
 
 def _compute_badges(roster_raw: list[dict]) -> dict:
-    """roster_raw: dicts with player_name, ab, avg, xbh, so, bb. Returns
+    """roster_raw: dicts with player_name, ab, avg, xbh, k, bb (bb already
+    includes HBP -- see get_team_scouting_report). Returns
     {player_name: [badge emoji, ...]}, comparing each player against the
     rest of THIS roster (a scouting tool is inherently relative -- "who
     stands out on this team" matters more than a fixed league-wide cutoff)."""
     qualified = [r for r in roster_raw if (r["ab"] or 0) >= _BADGE_MIN_AB]
     avg_cut = _top_n_value([r["avg"] for r in qualified if r["avg"] is not None])
     xbh_cut = _top_n_value([r["xbh"] for r in qualified])
-    so_cut = _top_n_value([r["so"] for r in qualified])
+    so_cut = _top_n_value([r["k"] for r in qualified])
     bb_cut = _top_n_value([r["bb"] for r in qualified])
 
     badges = {}
@@ -146,7 +147,7 @@ def _compute_badges(roster_raw: list[dict]) -> dict:
             earned.append(BADGE_HIGH_AVG)
         if xbh_cut is not None and (r["xbh"] or 0) >= xbh_cut:
             earned.append(BADGE_POWER)
-        if so_cut is not None and (r["so"] or 0) >= so_cut:
+        if so_cut is not None and (r["k"] or 0) >= so_cut:
             earned.append(BADGE_HIGH_SO)
         if bb_cut is not None and (r["bb"] or 0) >= bb_cut:
             earned.append(BADGE_HIGH_BB)
@@ -183,7 +184,7 @@ def get_team_scouting_report(team_key: int) -> dict:
             bat = conn.execute(
                 """SELECT COUNT(DISTINCT gc_game_id) AS games, SUM(ab) AS ab, SUM(h) AS h,
                           SUM(doubles) AS doubles, SUM(triples) AS triples, SUM(hr) AS hr,
-                          SUM(rbi) AS rbi, SUM(bb) AS bb, SUM(so) AS so
+                          SUM(bb) AS bb, SUM(hbp) AS hbp, SUM(so) AS so
                    FROM gc_batting_stats WHERE gc_player_id = ?""",
                 (gc_player_id,),
             ).fetchone()
@@ -202,6 +203,10 @@ def get_team_scouting_report(team_key: int) -> dict:
             hits = bat["h"] or 0
             avg = round(hits / ab, 3) if ab > 0 else None
             xbh = (bat["doubles"] or 0) + (bat["triples"] or 0) + (bat["hr"] or 0)
+            # BB column combines walks + HBP (hit by pitch) -- both are
+            # "reached base without putting the ball in play", a common
+            # combined plate-discipline read, per the user's request.
+            bb_total = (bat["bb"] or 0) + (bat["hbp"] or 0)
             ip_outs = pitch["ip_outs"] or 0
             pitches = pitch["pitches"] or 0
             strikes = pitch["strikes"]
@@ -215,10 +220,8 @@ def get_team_scouting_report(team_key: int) -> dict:
             roster_raw.append({
                 "player_name": player_name,
                 "games_played": bat["games"] or 0,
-                "ab": ab, "avg": avg, "xbh": xbh,
-                "so": bat["so"] or 0, "bb": bat["bb"] or 0,
-                "hr": bat["hr"] or 0,
-                "rbi": bat["rbi"] or 0,
+                "ab": ab, "avg": avg,
+                "xbh": xbh, "bb": bb_total, "k": bat["so"] or 0,
                 "ip": _format_ip(ip_outs) if ip_outs else None,
                 "era": era,
                 "so_pitching": pitch["so"] or 0,
@@ -231,10 +234,9 @@ def get_team_scouting_report(team_key: int) -> dict:
             {**r, "badges": badges_by_player.get(r["player_name"], [])}
             for r in roster_raw
         ]
-        # Internal-only fields used for badge math, not part of the response shape.
+        # ab is internal-only (badge eligibility threshold), not displayed.
         for r in roster:
-            for k in ("ab", "xbh", "so", "bb"):
-                r.pop(k, None)
+            r.pop("ab", None)
 
         roster.sort(key=lambda r: r["player_name"])
         return {

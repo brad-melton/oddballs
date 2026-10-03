@@ -267,8 +267,9 @@ class TeamScoutingRosterRow(BaseModel):
     player_name: str
     games_played: int
     avg: Optional[float] = None
-    hr: int
-    rbi: int
+    xbh: int
+    bb: int  # walks + HBP combined
+    k: int
     ip: Optional[str] = None
     era: Optional[float] = None
     so_pitching: int
