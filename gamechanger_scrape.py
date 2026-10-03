@@ -188,7 +188,7 @@ def _ensure_schema(conn):
             gc_game_id TEXT,
             gc_player_id TEXT,
             ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-            pitches INTEGER, strikes INTEGER,
+            pitches INTEGER, strikes INTEGER, bf INTEGER, hbp INTEGER,
             source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
             entered_by TEXT, entered_at TEXT, notes TEXT,
             UNIQUE(gc_game_id, gc_player_id),
@@ -207,6 +207,8 @@ def _ensure_schema(conn):
     # imported data) -- this codebase has no formal migration tool, so this
     # is the minimal equivalent: add the column by hand if it's missing.
     _ensure_column(conn, "gc_pitching_stats", "strikes", "INTEGER")
+    _ensure_column(conn, "gc_pitching_stats", "bf", "INTEGER")
+    _ensure_column(conn, "gc_pitching_stats", "hbp", "INTEGER")
     conn.commit()
 
 
@@ -504,17 +506,18 @@ def _upsert_fielding(conn, gc_game_id, gc_player_id, errors):
 
 
 def _upsert_pitching_scraped(conn, team_key, player_name, game_date, gc_game_id, gc_player_id,
-                              ip_outs, h, r, er, bb, so, hr, pitches, strikes):
+                              ip_outs, h, r, er, bb, so, hr, pitches, strikes, bf, hbp):
     conn.execute(
         """INSERT INTO gc_pitching_stats
-           (team_key, player_name, game_date, gc_game_id, gc_player_id, ip_outs, h, r, er, bb, so, hr, pitches, strikes, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scraped')
+           (team_key, player_name, game_date, gc_game_id, gc_player_id, ip_outs, h, r, er, bb, so, hr, pitches, strikes, bf, hbp, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scraped')
            ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
              team_key=excluded.team_key, player_name=excluded.player_name, game_date=excluded.game_date,
              ip_outs=excluded.ip_outs, h=excluded.h, r=excluded.r, er=excluded.er, bb=excluded.bb,
-             so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes""",
+             so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes,
+             bf=excluded.bf, hbp=excluded.hbp""",
         (team_key, player_name, game_date, gc_game_id, gc_player_id,
-         ip_outs, h, r, er, bb, so, hr, pitches, strikes),
+         ip_outs, h, r, er, bb, so, hr, pitches, strikes, bf, hbp),
     )
 
 
@@ -582,11 +585,15 @@ def _parse_team_block(conn, team_block, gc_game_id, team_key, gc_team_id=None):
                     _upsert_fielding(conn, gc_game_id, gc_player_id, errors_by_player[gc_player_id])
 
         elif category == "pitching":
-            # "#P" = pitch count, "TS" = total strikes thrown -- both only
-            # appear as "extra" stats (alongside the base IP/H/R/ER/BB/SO
-            # line), same as batting's 2B/3B/etc.
+            # "#P" = pitch count, "TS" = total strikes thrown, "BF" = batters
+            # faced, "HBP" = hit batters -- all only appear as "extra" stats
+            # (alongside the base IP/H/R/ER/BB/SO line), same as batting's
+            # 2B/3B/etc. BF + HBP (+ BB, already in the base line) are what
+            # batting-average-against is computed from downstream.
             pitches_by_player = {}
             strikes_by_player = {}
+            bf_by_player = {}
+            hbp_by_player = {}
             for extra in group.get("extra", []):
                 stat_name = extra.get("stat_name")
                 if stat_name == "#P":
@@ -595,6 +602,12 @@ def _parse_team_block(conn, team_block, gc_game_id, team_key, gc_team_id=None):
                 elif stat_name == "TS":
                     for s in extra.get("stats", []):
                         strikes_by_player[s["player_id"]] = s["value"]
+                elif stat_name == "BF":
+                    for s in extra.get("stats", []):
+                        bf_by_player[s["player_id"]] = s["value"]
+                elif stat_name == "HBP":
+                    for s in extra.get("stats", []):
+                        hbp_by_player[s["player_id"]] = s["value"]
 
             game_row = conn.execute("SELECT game_date FROM gc_games WHERE gc_game_id = ?", (gc_game_id,)).fetchone()
             game_date = game_row[0] if game_row else None
@@ -614,6 +627,8 @@ def _parse_team_block(conn, team_block, gc_game_id, team_key, gc_team_id=None):
                     bb=stats.get("BB", 0), so=stats.get("SO", 0), hr=stats.get("HR", 0),
                     pitches=pitches_by_player.get(gc_player_id),
                     strikes=strikes_by_player.get(gc_player_id),
+                    bf=bf_by_player.get(gc_player_id),
+                    hbp=hbp_by_player.get(gc_player_id),
                 )
 
     # No richer fielding breakdown (no putouts/assists/position) -- GC's box

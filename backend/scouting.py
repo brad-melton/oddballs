@@ -43,7 +43,8 @@ _SCHEMA_STATEMENTS = [
         player_name TEXT NOT NULL, game_date TEXT NOT NULL,
         gc_game_id TEXT, gc_player_id TEXT,
         ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-        pitches INTEGER, strikes INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
+        pitches INTEGER, strikes INTEGER, bf INTEGER, hbp INTEGER,
+        source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
         entered_by TEXT, entered_at TEXT, notes TEXT,
         UNIQUE(gc_game_id, gc_player_id), UNIQUE(team_key, player_name, game_date, source)
     )""",
@@ -63,10 +64,11 @@ def ensure_scouting_schema():
         # CREATE TABLE IF NOT EXISTS doesn't add a column to a table that
         # already exists from before it was added -- same ALTER TABLE
         # fallback as gamechanger_scrape.py/turso_sync.py use.
-        try:
-            conn.execute("ALTER TABLE gc_pitching_stats ADD COLUMN strikes INTEGER")
-        except Exception:
-            pass  # column already exists
+        for col in ("strikes", "bf", "hbp"):
+            try:
+                conn.execute(f"ALTER TABLE gc_pitching_stats ADD COLUMN {col} INTEGER")
+            except Exception:
+                pass  # column already exists
         conn.commit()
     finally:
         conn.close()
@@ -193,8 +195,9 @@ def get_team_scouting_report(team_key: int) -> dict:
             # double-count a game the scraper later also picks up. Keeping
             # this report's totals scraped-only avoids that overlap.
             pitch = conn.execute(
-                """SELECT SUM(ip_outs) AS ip_outs, SUM(er) AS er, SUM(so) AS so,
-                          SUM(pitches) AS pitches, SUM(strikes) AS strikes
+                """SELECT SUM(ip_outs) AS ip_outs, SUM(h) AS h, SUM(er) AS er, SUM(so) AS so,
+                          SUM(pitches) AS pitches, SUM(strikes) AS strikes,
+                          SUM(bf) AS bf, SUM(bb) AS bb, SUM(hbp) AS hbp
                    FROM gc_pitching_stats WHERE gc_player_id = ? AND source = 'scraped'""",
                 (gc_player_id,),
             ).fetchone()
@@ -217,6 +220,18 @@ def get_team_scouting_report(team_key: int) -> dict:
                 # so it's not the only number in the picture.
                 era = round((pitch["er"] or 0) * 9 / (ip_outs / 3), 2)
 
+            # Batting average against = hits allowed / at-bats faced, where
+            # at-bats faced = batters faced minus walks and hit batters
+            # (the standard simplified formula -- sac flies/bunts aren't
+            # broken out at the pitcher level in GC's data, same as real
+            # box scores rarely bother at this level either).
+            baa = None
+            bf = pitch["bf"] or 0
+            if bf > 0:
+                pitcher_ab = bf - (pitch["bb"] or 0) - (pitch["hbp"] or 0)
+                if pitcher_ab > 0:
+                    baa = round((pitch["h"] or 0) / pitcher_ab, 3)
+
             roster_raw.append({
                 "player_name": player_name,
                 "games_played": bat["games"] or 0,
@@ -227,6 +242,7 @@ def get_team_scouting_report(team_key: int) -> dict:
                 "so_pitching": pitch["so"] or 0,
                 "pitches": pitches if pitches else None,
                 "strike_pct": round(strikes / pitches * 100) if strikes is not None and pitches > 0 else None,
+                "baa": baa,
             })
 
         badges_by_player = _compute_badges(roster_raw)

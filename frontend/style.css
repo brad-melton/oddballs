@@ -153,6 +153,7 @@
   table.roster tr.scouting-row:hover td { background: rgba(248,231,201,0.08); }
   .scouting-badges { font-size: 12px; letter-spacing: 1px; }
   table.roster tr.scouting-totals-row td { border-top: 1px solid var(--line); font-weight: 600; color: var(--turf-bright); }
+  table.roster td.scouting-divider, table.roster th.scouting-divider { border-left: 1px solid var(--line); padding-left: 12px; }
 
   @media (min-width: 780px) {
     main { max-width: 900px; display: grid; grid-template-columns: 320px 1fr; gap: 20px; align-items: start; }

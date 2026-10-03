@@ -79,8 +79,8 @@ _GC_GAME_COLUMNS = [
 _GC_BATTING_COLUMNS = ["gc_game_id", "gc_player_id", "ab", "r", "h", "doubles", "triples", "hr",
                        "rbi", "bb", "so", "sb", "hbp", "sf", "sh"]
 _GC_PITCHING_COLUMNS = ["team_key", "player_name", "game_date", "gc_game_id", "gc_player_id",
-                        "ip_outs", "h", "r", "er", "bb", "so", "hr", "pitches", "strikes", "source",
-                        "entered_by", "entered_at", "notes"]
+                        "ip_outs", "h", "r", "er", "bb", "so", "hr", "pitches", "strikes", "bf", "hbp",
+                        "source", "entered_by", "entered_at", "notes"]
 _GC_FIELDING_COLUMNS = ["gc_game_id", "gc_player_id", "errors"]
 
 
@@ -317,7 +317,8 @@ _GC_SCHEMA_STATEMENTS = [
         player_name TEXT NOT NULL, game_date TEXT NOT NULL,
         gc_game_id TEXT, gc_player_id TEXT,
         ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-        pitches INTEGER, strikes INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
+        pitches INTEGER, strikes INTEGER, bf INTEGER, hbp INTEGER,
+        source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
         entered_by TEXT, entered_at TEXT, notes TEXT,
         UNIQUE(gc_game_id, gc_player_id), UNIQUE(team_key, player_name, game_date, source)
     )""",
@@ -336,10 +337,11 @@ def _ensure_remote_gc_schema(remote):
     # CREATE TABLE IF NOT EXISTS doesn't add a column to an already-existing
     # table -- same ALTER TABLE fallback as gamechanger_scrape.py's local
     # _ensure_schema, for whatever's already live on Turso.
-    try:
-        _retry(lambda: remote.execute("ALTER TABLE gc_pitching_stats ADD COLUMN strikes INTEGER"))
-    except Exception:
-        pass  # column already exists
+    for col in ("strikes", "bf", "hbp"):
+        try:
+            _retry(lambda col=col: remote.execute(f"ALTER TABLE gc_pitching_stats ADD COLUMN {col} INTEGER"))
+        except Exception:
+            pass  # column already exists
 
 
 def _sync_gc_teams(local, remote, gc_team_id: str = None) -> int:
@@ -461,7 +463,8 @@ def _sync_gc_pitching(local, remote, gc_team_id: str = None) -> int:
                 ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
                   team_key=excluded.team_key, player_name=excluded.player_name, game_date=excluded.game_date,
                   ip_outs=excluded.ip_outs, h=excluded.h, r=excluded.r, er=excluded.er, bb=excluded.bb,
-                  so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes""",
+                  so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes,
+                  bf=excluded.bf, hbp=excluded.hbp""",
             [row[c] for c in cols],
         ))
     return len(rows)

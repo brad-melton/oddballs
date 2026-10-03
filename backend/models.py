@@ -275,6 +275,7 @@ class TeamScoutingRosterRow(BaseModel):
     so_pitching: int
     pitches: Optional[int] = None
     strike_pct: Optional[float] = None
+    baa: Optional[float] = None  # batting average against
     # Emoji flags vs. the rest of this roster: high AVG, extra-base power,
     # strikeout-prone at the plate, and plate discipline (walks). See
     # scouting._compute_badges for the ranking logic.

@@ -99,11 +99,12 @@ function renderTeamReport(data) {
       <td>${p.xbh}</td>
       <td>${p.bb}</td>
       <td>${p.k}</td>
-      <td>${p.ip || '—'}</td>
+      <td class="scouting-divider">${p.ip || '—'}</td>
       <td>${p.era !== null ? p.era.toFixed(2) : '—'}</td>
       <td>${p.so_pitching}</td>
       <td>${p.pitches ?? '—'}</td>
       <td>${p.strike_pct !== null ? p.strike_pct + '%' : '—'}</td>
+      <td>${p.baa !== null ? p.baa.toFixed(3).replace(/^0/, '') : '—'}</td>
     </tr>
   `).join('');
 
@@ -112,13 +113,13 @@ function renderTeamReport(data) {
     ${data.last_scraped ? `<p class="placeholder-note" style="text-align:left; padding:2px 0 12px; font-size:11px;">Last scraped: ${data.last_scraped.split('T')[0]}</p>` : ''}
     <table class="roster">
       <thead><tr>
-        <th>Player</th><th>GP</th><th>AVG</th><th>XBH</th><th>BB</th><th>K</th><th>IP</th><th>ERA</th><th>SO (P)</th><th>Pitches</th><th>Strike%</th>
+        <th>Player</th><th>GP</th><th>AVG</th><th>XBH</th><th>BB</th><th>K</th><th class="scouting-divider">IP</th><th>ERA</th><th>SO (P)</th><th>Pitches</th><th>Strike%</th><th>BAA</th>
       </tr></thead>
       <tbody>${rows}</tbody>
     </table>
     <p class="placeholder-note" style="text-align:left; padding:10px 0 0; font-size:11px;">
       🏏 high average &nbsp; 💪 extra-base power &nbsp; 🌀 strikeout-prone &nbsp; 👁️ plate discipline (walks)
-      — relative to this roster, min. 3 AB. BB column includes HBP.
+      — relative to this roster, min. 3 AB. BB column includes HBP. BAA = batting average against.
     </p>
   `;
 
