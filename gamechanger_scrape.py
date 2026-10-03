@@ -24,11 +24,20 @@ real browser session.
 Login is the one genuinely different piece from fall2026catchupscoring.py:
 GameChanger's bot detection blocks a Playwright-LAUNCHED browser even during
 a real, manually-typed login (confirmed via recon). The workaround -- launch
-a real chrome.exe directly (not via Playwright) with a remote-debugging port,
-log in by hand, then have Playwright connect_over_cdp() to it -- is what
-`--login` below does. Whether the resulting storage_state() alone is enough
-to restore a working session on a later run, or whether every run needs this
-same real-Chrome dance, is unconfirmed -- see scrape_team()'s docstring.
+a real chrome.exe directly (not via Playwright) with a remote-debugging port
+and a persistent profile directory, log in by hand once, then have
+Playwright connect_over_cdp() to it -- is what `--login` below does.
+
+Every later run (the live scrape path, not --import-*) reuses that exact
+same pattern rather than Playwright's own launch() + a saved storage_state()
+snapshot: storage_state() was tried first and never got a chance to prove
+out -- every live attempt timed out before reaching real data, root cause
+unconfirmed. Relaunching a real chrome.exe against the same persistent
+profile directory (its cookies already on disk from --login) is the one
+thing already confirmed to work, both during this feature's own recon and
+in --login itself, so the normal scrape path now does the same thing: one
+real chrome.exe process per scrape_team() run, attached to once and reused
+across the roster/schedule/every box-score fetch, not relaunched per call.
 
 Usage:
     python gamechanger_scrape.py --login
@@ -70,7 +79,6 @@ logging.basicConfig(
 SQLITE_DB = os.environ.get("DB_PATH", r"C:\Users\bsmel\OneDrive\Documents\Baseball_data\10u data.db")
 
 _PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
-GC_STORAGE_STATE = os.path.join(_PROJECT_ROOT, "gc_storage_state.json")
 GC_LOGIN_PROFILE_DIR = os.path.join(_PROJECT_ROOT, ".gc_login_profile")
 CHROME_EXE = r"C:\Program Files\Google\Chrome\Application\chrome.exe"
 DEBUG_PORT = 9222
@@ -114,15 +122,14 @@ def cmd_login():
         )
         return
 
-    with sync_playwright() as p:
-        browser = p.chromium.connect_over_cdp(f"http://localhost:{DEBUG_PORT}")
-        context = browser.contexts[0]
-        input(
-            "\nLog into GameChanger in the Chrome window that just opened, and navigate to "
-            "your team's page, then come back here and press Enter...\n"
-        )
-        context.storage_state(path=GC_STORAGE_STATE)
-        print(f"Session saved to {GC_STORAGE_STATE}. You can close that Chrome window now.")
+    input(
+        "\nLog into GameChanger in the Chrome window that just opened, and navigate to "
+        "your team's page, then come back here and press Enter...\n"
+    )
+    print(
+        "Logged in -- that session is saved in this script's own Chrome profile, not just "
+        "this window. Close the Chrome window now; future runs relaunch it automatically."
+    )
 
 
 # ==============================================================================
@@ -236,6 +243,63 @@ def _extract_pg_eventid_from_notes(notes):
     return m.group(1) if m else None
 
 
+def _normalize_schedule_entries(schedule_data):
+    """GC has been observed to return two different shapes from what looks
+    like the same team-schedule page, depending on whether the logged-in
+    session is recognized as an actual member/coach of that team or not
+    (confirmed via a live 403 on a /relationships/requests call for an
+    account that otherwise logs in and fetches the roster fine) --
+    - Member-authenticated: a list of {event: {...}, pregame_data: {...}},
+      event_type "game"/"practice"/"other", with pregame_data.opponent_id
+      and a notes field carrying a Perfect Game event URL on tournament
+      block entries (this is the shape Phase 0 recon was done against).
+    - Not recognized as a member ("public" API paths): a flatter list of
+      {id, opponent_team: {name}, start_ts, home_away, score, game_status,
+      ...} -- no opponent_id, no notes/pg_eventid linkage, but it does
+      include the final score and a real "completed" status directly,
+      which the other shape never provides at this stage.
+
+    Normalizes either into a common list of dicts so the rest of this
+    script doesn't need to care which one it got. "other" (non-game)
+    entries from the richer shape still get yielded (is_game=False) so
+    their notes can be scanned for a pg_eventid by the caller.
+    """
+    normalized = []
+    for entry in schedule_data:
+        if "event" in entry:
+            event = entry.get("event", {})
+            if event.get("event_type") != "game":
+                normalized.append({"is_game": False, "notes": event.get("notes")})
+                continue
+            pregame = entry.get("pregame_data") or {}
+            start = event.get("start", {})
+            normalized.append({
+                "is_game": True,
+                "is_played": True,  # unknown either way in this shape -- try fetching regardless
+                "gc_game_id": event["id"],
+                "game_date": start.get("datetime") or start.get("date"),
+                "opponent_name": pregame.get("opponent_name"),
+                "opponent_id": pregame.get("opponent_id"),
+                "home_away": pregame.get("home_away"),
+                "final_score_for": None,
+                "final_score_against": None,
+            })
+        else:
+            score = entry.get("score") or {}
+            normalized.append({
+                "is_game": True,
+                "is_played": entry.get("game_status") == "completed",
+                "gc_game_id": entry["id"],
+                "game_date": entry.get("start_ts"),
+                "opponent_name": (entry.get("opponent_team") or {}).get("name"),
+                "opponent_id": None,
+                "home_away": entry.get("home_away"),
+                "final_score_for": score.get("team"),
+                "final_score_against": score.get("opponent_team"),
+            })
+    return normalized
+
+
 def _player_display_name(first_name, last_name):
     parts = [p for p in (first_name, last_name) if p]
     return " ".join(parts) if parts else "Unknown"
@@ -263,22 +327,71 @@ _BATTING_EXTRA_MAP = {"2B": "doubles", "3B": "triples", "HR": "hr", "SB": "sb", 
 # AUTHENTICATED BROWSING
 # ==============================================================================
 
-def _authenticated_context(p):
-    if not os.path.exists(GC_STORAGE_STATE):
-        print(f"No saved session found at {GC_STORAGE_STATE}. Run: python gamechanger_scrape.py --login")
+def _attach_real_chrome(p):
+    """Launches a real (non-Playwright) chrome.exe against the persistent
+    login profile from --login and attaches to it over CDP -- see the
+    module docstring for why this replaced a Playwright-launched browser +
+    storage_state(). Returns (chrome_process, browser, context, page); call
+    _detach_real_chrome() with all four when done.
+
+    Headed (not headless) for now -- whether headless mode trips GameChanger's
+    bot detection the same way a Playwright-launched browser does hasn't
+    been tested, and this is the one path already confirmed to work."""
+    if not os.path.isdir(GC_LOGIN_PROFILE_DIR):
+        print("No saved login found. Run: python gamechanger_scrape.py --login")
         sys.exit(1)
-    # headed (not headless) for now -- whether headless mode trips GameChanger's
-    # bot detection for plain page loads (as opposed to the login flow, which
-    # it's confirmed to block) hasn't been tested yet.
-    browser = p.chromium.launch(headless=False)
-    context = browser.new_context(storage_state=GC_STORAGE_STATE, viewport={"width": 1400, "height": 1000})
-    return browser, context
+
+    proc = subprocess.Popen([
+        CHROME_EXE,
+        f"--remote-debugging-port={DEBUG_PORT}",
+        f"--user-data-dir={GC_LOGIN_PROFILE_DIR}",
+        "about:blank",
+    ])
+    if not _wait_for_cdp(DEBUG_PORT):
+        proc.terminate()
+        print(
+            f"Chrome never opened a debugging port on {DEBUG_PORT}. If a Chrome window using "
+            "this script's profile is already open (e.g. still open from --login), close it "
+            "and try again."
+        )
+        sys.exit(1)
+
+    browser = p.chromium.connect_over_cdp(f"http://localhost:{DEBUG_PORT}")
+    context = browser.contexts[0] if browser.contexts else browser.new_context()
+    page = context.new_page()
+    return proc, browser, context, page
+
+
+def _detach_real_chrome(proc, browser):
+    try:
+        browser.close()  # disconnects the CDP session, doesn't kill the process (see Playwright docs)
+    except Exception:
+        pass
+    proc.terminate()
+
+
+_GC_API_HOST = "api.team-manager.gc.com"
+
+
+def _fetch_json_matching(page, goto_url, is_match, timeout=30000):
+    with page.expect_response(is_match, timeout=timeout) as resp_info:
+        page.goto(goto_url, wait_until="domcontentloaded")
+    return resp_info.value.json()
 
 
 def _fetch_json(page, goto_url, url_contains, timeout=30000):
-    with page.expect_response(lambda r: url_contains in r.url and r.status == 200, timeout=timeout) as resp_info:
-        page.goto(goto_url, wait_until="domcontentloaded")
-    return resp_info.value.json()
+    """Matches on the real API host, not just url_contains alone -- a plain
+    substring match can collide with the page's own navigation URL (e.g.
+    the schedule page URL and the schedule API URL both contain "/schedule",
+    so expect_response() was catching the HTML document response instead
+    of the JSON API one; confirmed via a real JSONDecodeError on real data).
+    The app's pages are always on web.gc.com, never on the API host, so
+    this can't collide the same way."""
+    return _fetch_json_matching(
+        page, goto_url,
+        lambda r: _GC_API_HOST in r.url and url_contains in r.url and r.status == 200,
+        timeout=timeout,
+    )
 
 
 def _fetch_roster(page, gc_team_url):
@@ -289,8 +402,20 @@ def _fetch_roster(page, gc_team_url):
         return _fetch_json(page, gc_team_url.rstrip("/") + "/roster", "/players")
 
 
+_SCHEDULE_URL_RE = re.compile(r"/schedule(\?|$)|/games(\?|$)")
+
+
 def _fetch_schedule(page, gc_team_url):
-    return _fetch_json(page, gc_team_url.rstrip("/") + "/schedule", "/schedule")
+    """Which of these two paths actually fires depends on whether the
+    session is recognized as a team member or not -- see
+    _normalize_schedule_entries()'s docstring. Match either -- "/games" has
+    to require that it's the LAST path segment (not just contained), since
+    the same navigation also fires a "/games/preview" call that would
+    otherwise match too and get returned instead of the real one."""
+    return _fetch_json_matching(
+        page, gc_team_url.rstrip("/") + "/schedule",
+        lambda r: _GC_API_HOST in r.url and r.status == 200 and _SCHEDULE_URL_RE.search(r.url),
+    )
 
 
 def _fetch_box_score(page, gc_team_url, gc_game_id):
@@ -564,18 +689,14 @@ def _process_box_score(conn, gc_team_id, own_pg_team_key, own_hint, gc_game_id, 
     conn.commit()
 
 
-def scrape_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id):
+def scrape_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id, page):
     """Fetches and stores one game's box score, for BOTH teams it contains --
     one boxscore call covers the opponent's stats too, no separate access to
-    their own GC page needed."""
-    with sync_playwright() as p:
-        browser, context = _authenticated_context(p)
-        page = context.new_page()
-        try:
-            box_score, boxscore_url = _fetch_box_score(page, gc_url, gc_game_id)
-        finally:
-            browser.close()
-
+    their own GC page needed. Takes an already-open, already-authenticated
+    page (see scrape_team()) rather than opening its own browser session --
+    with potentially many games per team, relaunching Chrome per game would
+    be both slow and a lot more places for the launch/attach dance to fail."""
+    box_score, boxscore_url = _fetch_box_score(page, gc_url, gc_game_id)
     _process_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id, box_score, boxscore_url=boxscore_url)
 
 
@@ -588,7 +709,7 @@ def scrape_team(gc_team_url=None, gc_team_id=None, pg_team_key=None, only_new=Tr
     Full scrape for one team: roster, schedule, and box scores for every
     game found (or just new ones, if only_new). First scrape of a team needs
     gc_team_url; later re-scrapes can pass gc_team_id instead (stored URL is
-    reused). Requires a saved session from --login.
+    reused). Requires a saved login from --login.
     """
     conn = sqlite3.connect(SQLITE_DB)
     _ensure_schema(conn)
@@ -603,82 +724,76 @@ def scrape_team(gc_team_url=None, gc_team_id=None, pg_team_key=None, only_new=Tr
         gc_team_url = row[0]
 
     with sync_playwright() as p:
-        browser, context = _authenticated_context(p)
-        page = context.new_page()
+        proc, browser, context, page = _attach_real_chrome(p)
         try:
-            roster = _fetch_roster(page, gc_team_url)
-            schedule = _fetch_schedule(page, gc_team_url)
-        except PlaywrightTimeoutError:
-            print(
-                "Didn't see the expected GameChanger data load in time -- your session may "
-                "have expired. Run: python gamechanger_scrape.py --login"
-            )
-            browser.close()
-            return
+            try:
+                roster = _fetch_roster(page, gc_team_url)
+                schedule = _fetch_schedule(page, gc_team_url)
+            except PlaywrightTimeoutError:
+                print(
+                    "Didn't see the expected GameChanger data load in time -- your login may "
+                    "have expired. Run: python gamechanger_scrape.py --login"
+                )
+                return
+
+            slug = _extract_gc_slug(gc_team_url) or gc_team_id
+            real_gc_team_id = gc_team_id or slug
+            _upsert_gc_team(conn, real_gc_team_id, slug, gc_url=gc_team_url, pg_team_key=pg_team_key)
+
+            for player in roster:
+                _upsert_gc_player(
+                    conn, player["id"], _player_display_name(player.get("first_name"), player.get("last_name")),
+                    gc_team_id=real_gc_team_id, jersey_number=player.get("number"),
+                )
+            conn.commit()
+
+            current_pg_eventid = None
+            games = []
+            unplayed_skipped = 0
+            for norm in _normalize_schedule_entries(schedule):
+                if not norm["is_game"]:
+                    pg_eid = _extract_pg_eventid_from_notes(norm.get("notes"))
+                    if pg_eid:
+                        current_pg_eventid = pg_eid
+                    continue
+
+                if norm["opponent_id"] and norm["opponent_name"]:
+                    _upsert_gc_team(conn, norm["opponent_id"], norm["opponent_name"])
+
+                _upsert_gc_game(
+                    conn, real_gc_team_id, norm["gc_game_id"], norm["game_date"],
+                    norm["opponent_name"], norm["opponent_id"], norm["home_away"],
+                    final_score_for=norm["final_score_for"], final_score_against=norm["final_score_against"],
+                    pg_eventid=current_pg_eventid,
+                )
+                if norm["is_played"]:
+                    games.append(norm["gc_game_id"])
+                else:
+                    unplayed_skipped += 1
+            conn.commit()
+
+            if unplayed_skipped:
+                print(f"Skipping {unplayed_skipped} game(s) not marked completed yet.")
+
+            if only_new:
+                already_scraped = {
+                    r[0] for r in conn.execute(
+                        "SELECT DISTINCT gc_game_id FROM gc_pitching_stats WHERE source = 'scraped'"
+                    ).fetchall()
+                }
+                games = [gid for gid in games if gid not in already_scraped]
+
+            print(f"Scraping box scores for {len(games)} game(s)...")
+            for gc_game_id in games:
+                try:
+                    scrape_box_score(conn, real_gc_team_id, pg_team_key, gc_team_url, gc_game_id, page)
+                    print(f"  scraped game {gc_game_id}")
+                except PlaywrightTimeoutError:
+                    logging.warning(f"Box score didn't load for game {gc_game_id} -- probably not played yet, skipping")
+                except Exception as e:
+                    logging.error(f"Failed to scrape box score for game {gc_game_id}: {e}")
         finally:
-            browser.close()
-
-    slug = _extract_gc_slug(gc_team_url) or gc_team_id
-    real_gc_team_id = gc_team_id or slug
-    _upsert_gc_team(conn, real_gc_team_id, slug, gc_url=gc_team_url, pg_team_key=pg_team_key)
-
-    for player in roster:
-        _upsert_gc_player(
-            conn, player["id"], _player_display_name(player.get("first_name"), player.get("last_name")),
-            gc_team_id=real_gc_team_id, jersey_number=player.get("number"),
-        )
-    conn.commit()
-
-    current_pg_eventid = None
-    games = []
-    for entry in schedule:
-        event = entry.get("event", {})
-        etype = event.get("event_type")
-
-        if etype == "other":
-            pg_eid = _extract_pg_eventid_from_notes(event.get("notes"))
-            if pg_eid:
-                current_pg_eventid = pg_eid
-            continue
-
-        if etype != "game":
-            continue
-
-        pregame = entry.get("pregame_data") or {}
-        gc_game_id = event["id"]
-        start = event.get("start", {})
-        game_date = start.get("datetime") or start.get("date")
-        opponent_name = pregame.get("opponent_name")
-        opponent_id = pregame.get("opponent_id")
-        home_away = pregame.get("home_away")
-
-        if opponent_id and opponent_name:
-            _upsert_gc_team(conn, opponent_id, opponent_name)
-
-        _upsert_gc_game(
-            conn, real_gc_team_id, gc_game_id, game_date, opponent_name, opponent_id, home_away,
-            pg_eventid=current_pg_eventid,
-        )
-        games.append(gc_game_id)
-    conn.commit()
-
-    if only_new:
-        already_scraped = {
-            r[0] for r in conn.execute(
-                "SELECT DISTINCT gc_game_id FROM gc_pitching_stats WHERE source = 'scraped'"
-            ).fetchall()
-        }
-        games = [gid for gid in games if gid not in already_scraped]
-
-    print(f"Scraping box scores for {len(games)} game(s)...")
-    for gc_game_id in games:
-        try:
-            scrape_box_score(conn, real_gc_team_id, pg_team_key, gc_team_url, gc_game_id)
-            print(f"  scraped game {gc_game_id}")
-        except PlaywrightTimeoutError:
-            logging.warning(f"Box score didn't load for game {gc_game_id} -- probably not played yet, skipping")
-        except Exception as e:
-            logging.error(f"Failed to scrape box score for game {gc_game_id}: {e}")
+            _detach_real_chrome(proc, browser)
 
     conn.close()
     _sync_after_import(real_gc_team_id)
@@ -722,31 +837,22 @@ def cmd_import_schedule(gc_team_id, path, gc_team_name=None, pg_team_key=None):
 
     current_pg_eventid = None
     count = 0
-    for entry in schedule:
-        event = entry.get("event", {})
-        etype = event.get("event_type")
-
-        if etype == "other":
-            pg_eid = _extract_pg_eventid_from_notes(event.get("notes"))
+    for norm in _normalize_schedule_entries(schedule):
+        if not norm["is_game"]:
+            pg_eid = _extract_pg_eventid_from_notes(norm.get("notes"))
             if pg_eid:
                 current_pg_eventid = pg_eid
             continue
-        if etype != "game":
-            continue
 
-        pregame = entry.get("pregame_data") or {}
-        gc_game_id = event["id"]
-        start = event.get("start", {})
-        game_date = start.get("datetime") or start.get("date")
-        opponent_name = pregame.get("opponent_name")
-        opponent_id = pregame.get("opponent_id")
-        home_away = pregame.get("home_away")
+        if norm["opponent_id"] and norm["opponent_name"]:
+            _upsert_gc_team(conn, norm["opponent_id"], norm["opponent_name"])
 
-        if opponent_id and opponent_name:
-            _upsert_gc_team(conn, opponent_id, opponent_name)
-
-        _upsert_gc_game(conn, gc_team_id, gc_game_id, game_date, opponent_name, opponent_id, home_away,
-                         pg_eventid=current_pg_eventid)
+        _upsert_gc_game(
+            conn, gc_team_id, norm["gc_game_id"], norm["game_date"],
+            norm["opponent_name"], norm["opponent_id"], norm["home_away"],
+            final_score_for=norm["final_score_for"], final_score_against=norm["final_score_against"],
+            pg_eventid=current_pg_eventid,
+        )
         count += 1
 
     conn.commit()
@@ -800,8 +906,9 @@ if __name__ == "__main__":
     parser.add_argument("--gc-team-name", type=str, default=None,
                          help="Display name for --gc-team-id on an --import-* command (defaults to the raw id "
                               "if not given -- fine to leave unset and fix later via the admin page).")
-    parser.add_argument("--only-new", action="store_true",
-                         help="Skip games that already have scraped stats locally (default: rescrape everything found).")
+    parser.add_argument("--only-new", action=argparse.BooleanOptionalAction, default=True,
+                         help="Skip games that already have scraped stats locally (default: on -- pass "
+                              "--no-only-new to force a full rescrape of every completed game found).")
     parser.add_argument("--import-schedule", type=str, default=None, metavar="FILE",
                          help="Import a schedule JSON file saved manually from DevTools (Network tab -> "
                               "the /schedule request -> Copy response), instead of a live scrape. "
