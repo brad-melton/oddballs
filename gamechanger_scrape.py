@@ -34,8 +34,19 @@ Usage:
     python gamechanger_scrape.py --login
     python gamechanger_scrape.py --team-url <gc team page URL> [--pg-team-key <id>]
     python gamechanger_scrape.py --gc-team-id <id> [--only-new]
+
+    # Manual fallback, no live browser session needed -- for when --login's
+    # live fetch path isn't working (e.g. session restore unconfirmed, see
+    # above) and speed matters more than automation. Same DevTools "copy
+    # response" trick used during this feature's own recon: open the page on
+    # GC, Network tab, find the real (non-preflight) request, copy its
+    # response body to a .json file, then import it:
+    python gamechanger_scrape.py --import-schedule schedule.json --gc-team-id <id>
+    python gamechanger_scrape.py --import-roster roster.json --gc-team-id <id>
+    python gamechanger_scrape.py --import-boxscore boxscore.json --gc-team-id <id> --gc-game-id <id>
 """
 import argparse
+import json
 import logging
 import os
 import re
@@ -375,18 +386,20 @@ def _upsert_pitching_scraped(conn, team_key, player_name, game_date, gc_game_id,
 # BOX SCORE PARSING
 # ==============================================================================
 
-def _pick_own_team_block(box_score, gc_url):
+def _pick_own_team_block(box_score, own_hint):
     """The box-score response is keyed by team identifier, but confusingly not
     consistently: the team whose page you're viewing is keyed by its URL slug
     (e.g. "Hs8vhcpzKVtF"), while the opponent is keyed by its internal team
     UUID -- confirmed via recon, these are NOT the same identifier space as
-    the team_id used everywhere else in the API. Disambiguates using the
-    known slug from gc_url; whichever other key remains is the opponent."""
+    the team_id used everywhere else in the API. own_hint can be that raw
+    slug/id directly (manual-import path) or a full gc_url to extract it
+    from (live-scrape path); whichever other key remains is the opponent."""
     keys = list(box_score.keys())
     if len(keys) != 2:
         logging.warning(f"Expected exactly 2 teams in box score, got {len(keys)}: {keys}")
-    slug = _extract_gc_slug(gc_url)
-    own_key = slug if slug in box_score else keys[0]
+    own_key = own_hint if own_hint in box_score else _extract_gc_slug(own_hint)
+    if own_key not in box_score:
+        own_key = keys[0]
     other_keys = [k for k in keys if k != own_key]
     opponent_key = other_keys[0] if other_keys else None
     return own_key, opponent_key
@@ -470,6 +483,59 @@ def _team_final_score(team_block):
     return None
 
 
+def _process_box_score(conn, gc_team_id, own_pg_team_key, own_hint, gc_game_id, box_score, boxscore_url=None):
+    """Shared by the live scrape and the manual --import-boxscore path: given
+    an already-fetched box-score JSON blob, resolves own-vs-opponent and
+    upserts everything. Ensures a bare gc_games row exists first so this
+    also works standalone (e.g. testing one game without ever importing a
+    schedule)."""
+    existing = conn.execute("SELECT gc_game_id FROM gc_games WHERE gc_game_id = ?", (gc_game_id,)).fetchone()
+    if not existing:
+        # Placeholder date -- gc_pitching_stats.game_date is NOT NULL (it's
+        # load-bearing for Phase B's by-date pitch-count rule), and nothing
+        # real is known yet without a schedule import. A later --import-
+        # schedule overwrites this with the real date (unconditional SET in
+        # _upsert_gc_game's ON CONFLICT, not COALESCE).
+        placeholder_date = datetime.now(timezone.utc).date().isoformat()
+        _upsert_gc_game(conn, gc_team_id, gc_game_id, placeholder_date, None, None, None)
+
+    own_key, opponent_key = _pick_own_team_block(box_score, own_hint)
+    own_block = box_score.get(own_key, {})
+    opponent_block = box_score.get(opponent_key, {}) if opponent_key else {}
+
+    final_for = _team_final_score(own_block)
+    final_against = _team_final_score(opponent_block)
+    conn.execute(
+        "UPDATE gc_games SET final_score_for = COALESCE(?, final_score_for), "
+        "final_score_against = COALESCE(?, final_score_against), "
+        "boxscore_url = COALESCE(?, boxscore_url) WHERE gc_game_id = ?",
+        (final_for, final_against, boxscore_url, gc_game_id),
+    )
+
+    _parse_team_block(conn, own_block, gc_game_id, own_pg_team_key, gc_team_id=gc_team_id)
+
+    if opponent_block:
+        # Resolve the opponent's own gc_teams row (auto-created from the
+        # schedule's pregame_data, if one was imported) so their players/
+        # pitching attribute to it. Falls back to the box score's own
+        # opponent key if no schedule-derived opponent_id is on file yet.
+        game_row = conn.execute("SELECT opponent_id FROM gc_games WHERE gc_game_id = ?", (gc_game_id,)).fetchone()
+        opponent_gc_team_id = (game_row[0] if game_row and game_row[0] else opponent_key)
+        opponent_pg_team_key = None
+        if opponent_gc_team_id:
+            t = conn.execute("SELECT pg_team_key FROM gc_teams WHERE gc_team_id = ?", (opponent_gc_team_id,)).fetchone()
+            if t:
+                opponent_pg_team_key = t[0]
+            else:
+                # No name known for this opponent yet (no schedule imported)
+                # -- placeholder so the row exists; a later schedule import
+                # overwrites gc_team_name with the real one on conflict.
+                _upsert_gc_team(conn, opponent_gc_team_id, opponent_gc_team_id)
+        _parse_team_block(conn, opponent_block, gc_game_id, opponent_pg_team_key, gc_team_id=opponent_gc_team_id)
+
+    conn.commit()
+
+
 def scrape_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id):
     """Fetches and stores one game's box score, for BOTH teams it contains --
     one boxscore call covers the opponent's stats too, no separate access to
@@ -482,33 +548,7 @@ def scrape_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id):
         finally:
             browser.close()
 
-    own_key, opponent_key = _pick_own_team_block(box_score, gc_url)
-    own_block = box_score.get(own_key, {})
-    opponent_block = box_score.get(opponent_key, {}) if opponent_key else {}
-
-    final_for = _team_final_score(own_block)
-    final_against = _team_final_score(opponent_block)
-    conn.execute(
-        "UPDATE gc_games SET final_score_for = ?, final_score_against = ?, boxscore_url = ? WHERE gc_game_id = ?",
-        (final_for, final_against, boxscore_url, gc_game_id),
-    )
-
-    _parse_team_block(conn, own_block, gc_game_id, own_pg_team_key, gc_team_id=gc_team_id)
-
-    if opponent_block:
-        # Resolve the opponent's own gc_teams row (auto-created from the
-        # schedule's pregame_data) so their players/pitching attribute to it.
-        game_row = conn.execute("SELECT opponent_id FROM gc_games WHERE gc_game_id = ?", (gc_game_id,)).fetchone()
-        opponent_gc_team_id = None
-        opponent_pg_team_key = None
-        if game_row and game_row[0]:
-            opponent_gc_team_id = game_row[0]
-            t = conn.execute("SELECT pg_team_key FROM gc_teams WHERE gc_team_id = ?", (opponent_gc_team_id,)).fetchone()
-            if t:
-                opponent_pg_team_key = t[0]
-        _parse_team_block(conn, opponent_block, gc_game_id, opponent_pg_team_key, gc_team_id=opponent_gc_team_id)
-
-    conn.commit()
+    _process_box_score(conn, gc_team_id, own_pg_team_key, gc_url, gc_game_id, box_score, boxscore_url=boxscore_url)
 
 
 # ==============================================================================
@@ -613,14 +653,95 @@ def scrape_team(gc_team_url=None, gc_team_id=None, pg_team_key=None, only_new=Tr
             logging.error(f"Failed to scrape box score for game {gc_game_id}: {e}")
 
     conn.close()
-
-    import turso_sync
-    if turso_sync.enabled():
-        turso_sync.sync_to_turso(gc_team_id=real_gc_team_id)
-    else:
-        print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set -- skipping Turso sync (local-only run).")
-
+    _sync_after_import(real_gc_team_id)
     print("Done.")
+
+
+# ==============================================================================
+# MANUAL IMPORT (no live browser session needed) -- see module docstring
+# ==============================================================================
+
+def _sync_after_import(gc_team_id):
+    """A sync hiccup shouldn't take down an otherwise-successful local
+    import/scrape with a crash -- the local data is already saved either way."""
+    import turso_sync
+    if not turso_sync.enabled():
+        print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set -- skipping Turso sync (local-only run).")
+        return
+    try:
+        turso_sync.sync_to_turso(gc_team_id=gc_team_id)
+    except Exception as e:
+        print(f"Local data saved, but the Turso sync failed: {e}")
+        logging.error(f"Turso sync failed after import for gc_team_id={gc_team_id}: {e}")
+
+
+def cmd_import_schedule(gc_team_id, path):
+    with open(path, encoding="utf-8") as f:
+        schedule = json.load(f)
+
+    conn = sqlite3.connect(SQLITE_DB)
+    _ensure_schema(conn)
+
+    current_pg_eventid = None
+    count = 0
+    for entry in schedule:
+        event = entry.get("event", {})
+        etype = event.get("event_type")
+
+        if etype == "other":
+            pg_eid = _extract_pg_eventid_from_notes(event.get("notes"))
+            if pg_eid:
+                current_pg_eventid = pg_eid
+            continue
+        if etype != "game":
+            continue
+
+        pregame = entry.get("pregame_data") or {}
+        gc_game_id = event["id"]
+        start = event.get("start", {})
+        game_date = start.get("datetime") or start.get("date")
+        opponent_name = pregame.get("opponent_name")
+        opponent_id = pregame.get("opponent_id")
+        home_away = pregame.get("home_away")
+
+        if opponent_id and opponent_name:
+            _upsert_gc_team(conn, opponent_id, opponent_name)
+
+        _upsert_gc_game(conn, gc_team_id, gc_game_id, game_date, opponent_name, opponent_id, home_away,
+                         pg_eventid=current_pg_eventid)
+        count += 1
+
+    conn.commit()
+    conn.close()
+    print(f"Imported {count} game(s) from {path}.")
+    _sync_after_import(gc_team_id)
+
+
+def cmd_import_roster(gc_team_id, path):
+    with open(path, encoding="utf-8") as f:
+        roster = json.load(f)
+
+    conn = sqlite3.connect(SQLITE_DB)
+    _ensure_schema(conn)
+    for player in roster:
+        _upsert_gc_player(conn, player["id"], _player_display_name(player.get("first_name"), player.get("last_name")),
+                           gc_team_id=gc_team_id, jersey_number=player.get("number"))
+    conn.commit()
+    conn.close()
+    print(f"Imported {len(roster)} player(s) from {path}.")
+    _sync_after_import(gc_team_id)
+
+
+def cmd_import_boxscore(gc_team_id, gc_game_id, path, pg_team_key=None):
+    with open(path, encoding="utf-8") as f:
+        box_score = json.load(f)
+
+    conn = sqlite3.connect(SQLITE_DB)
+    _ensure_schema(conn)
+    _process_box_score(conn, gc_team_id, pg_team_key, gc_team_id, gc_game_id, box_score)
+    conn.close()
+    print(f"Imported box score for game {gc_game_id} from {path}.")
+    _sync_after_import(gc_team_id)
 
 
 if __name__ == "__main__":
@@ -632,14 +753,39 @@ if __name__ == "__main__":
                          help="Full GameChanger team page URL (needed the first time you scrape a team).")
     parser.add_argument("--gc-team-id", type=str, default=None,
                          help="Re-scrape a team already stored (its GC team id from a prior --team-url run).")
+    parser.add_argument("--gc-game-id", type=str, default=None,
+                         help="The GameChanger game id for --import-boxscore (from the box-score page URL).")
     parser.add_argument("--pg-team-key", type=int, default=None,
                          help="Link this team to an existing teams.id row in the local PG database.")
     parser.add_argument("--only-new", action="store_true",
                          help="Skip games that already have scraped stats locally (default: rescrape everything found).")
+    parser.add_argument("--import-schedule", type=str, default=None, metavar="FILE",
+                         help="Import a schedule JSON file saved manually from DevTools (Network tab -> "
+                              "the /schedule request -> Copy response), instead of a live scrape. "
+                              "Requires --gc-team-id.")
+    parser.add_argument("--import-roster", type=str, default=None, metavar="FILE",
+                         help="Import a roster JSON file (the /players request) the same way. Requires --gc-team-id.")
+    parser.add_argument("--import-boxscore", type=str, default=None, metavar="FILE",
+                         help="Import a box-score JSON file (the /boxscore request) the same way. "
+                              "Requires --gc-team-id and --gc-game-id.")
     args = parser.parse_args()
 
     if args.login:
         cmd_login()
+    elif args.import_schedule:
+        if not args.gc_team_id:
+            parser.error("--import-schedule requires --gc-team-id (the slug/id from the team's GC page URL)")
+        cmd_import_schedule(args.gc_team_id, args.import_schedule)
+    elif args.import_roster:
+        if not args.gc_team_id:
+            parser.error("--import-roster requires --gc-team-id")
+        cmd_import_roster(args.gc_team_id, args.import_roster)
+    elif args.import_boxscore:
+        if not args.gc_team_id:
+            parser.error("--import-boxscore requires --gc-team-id")
+        if not args.gc_game_id:
+            parser.error("--import-boxscore requires --gc-game-id (the game id from the box-score page URL)")
+        cmd_import_boxscore(args.gc_team_id, args.gc_game_id, args.import_boxscore, pg_team_key=args.pg_team_key)
     elif args.team_url or args.gc_team_id:
         scrape_team(gc_team_url=args.team_url, gc_team_id=args.gc_team_id,
                     pg_team_key=args.pg_team_key, only_new=args.only_new)
