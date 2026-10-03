@@ -531,6 +531,15 @@ def _process_box_score(conn, gc_team_id, own_pg_team_key, own_hint, gc_game_id, 
                 # -- placeholder so the row exists; a later schedule import
                 # overwrites gc_team_name with the real one on conflict.
                 _upsert_gc_team(conn, opponent_gc_team_id, opponent_gc_team_id)
+            # Backfill gc_games.opponent_id too -- without a schedule import
+            # it's still NULL at this point, which would otherwise silently
+            # drop this opponent from any gc_team_id-scoped sync/query that
+            # looks it up via gc_games.opponent_id (e.g. turso_sync's
+            # _sync_gc_teams/_sync_gc_players).
+            conn.execute(
+                "UPDATE gc_games SET opponent_id = COALESCE(opponent_id, ?) WHERE gc_game_id = ?",
+                (opponent_gc_team_id, gc_game_id),
+            )
         _parse_team_block(conn, opponent_block, gc_game_id, opponent_pg_team_key, gc_team_id=opponent_gc_team_id)
 
     conn.commit()
@@ -675,12 +684,17 @@ def _sync_after_import(gc_team_id):
         logging.error(f"Turso sync failed after import for gc_team_id={gc_team_id}: {e}")
 
 
-def cmd_import_schedule(gc_team_id, path):
+def cmd_import_schedule(gc_team_id, path, gc_team_name=None, pg_team_key=None):
     with open(path, encoding="utf-8") as f:
         schedule = json.load(f)
 
     conn = sqlite3.connect(SQLITE_DB)
     _ensure_schema(conn)
+    # Own team's gc_teams row -- none of the three import commands create
+    # this as a side effect of anything else (unlike scrape_team(), which
+    # does this explicitly before touching roster/schedule/boxscore), so
+    # without it there's nothing for the Scouting page to map to a PG team.
+    _upsert_gc_team(conn, gc_team_id, gc_team_name or gc_team_id, pg_team_key=pg_team_key)
 
     current_pg_eventid = None
     count = 0
@@ -717,12 +731,13 @@ def cmd_import_schedule(gc_team_id, path):
     _sync_after_import(gc_team_id)
 
 
-def cmd_import_roster(gc_team_id, path):
+def cmd_import_roster(gc_team_id, path, gc_team_name=None, pg_team_key=None):
     with open(path, encoding="utf-8") as f:
         roster = json.load(f)
 
     conn = sqlite3.connect(SQLITE_DB)
     _ensure_schema(conn)
+    _upsert_gc_team(conn, gc_team_id, gc_team_name or gc_team_id, pg_team_key=pg_team_key)
     for player in roster:
         _upsert_gc_player(conn, player["id"], _player_display_name(player.get("first_name"), player.get("last_name")),
                            gc_team_id=gc_team_id, jersey_number=player.get("number"))
@@ -732,12 +747,13 @@ def cmd_import_roster(gc_team_id, path):
     _sync_after_import(gc_team_id)
 
 
-def cmd_import_boxscore(gc_team_id, gc_game_id, path, pg_team_key=None):
+def cmd_import_boxscore(gc_team_id, gc_game_id, path, gc_team_name=None, pg_team_key=None):
     with open(path, encoding="utf-8") as f:
         box_score = json.load(f)
 
     conn = sqlite3.connect(SQLITE_DB)
     _ensure_schema(conn)
+    _upsert_gc_team(conn, gc_team_id, gc_team_name or gc_team_id, pg_team_key=pg_team_key)
     _process_box_score(conn, gc_team_id, pg_team_key, gc_team_id, gc_game_id, box_score)
     conn.close()
     print(f"Imported box score for game {gc_game_id} from {path}.")
@@ -757,6 +773,9 @@ if __name__ == "__main__":
                          help="The GameChanger game id for --import-boxscore (from the box-score page URL).")
     parser.add_argument("--pg-team-key", type=int, default=None,
                          help="Link this team to an existing teams.id row in the local PG database.")
+    parser.add_argument("--gc-team-name", type=str, default=None,
+                         help="Display name for --gc-team-id on an --import-* command (defaults to the raw id "
+                              "if not given -- fine to leave unset and fix later via the admin page).")
     parser.add_argument("--only-new", action="store_true",
                          help="Skip games that already have scraped stats locally (default: rescrape everything found).")
     parser.add_argument("--import-schedule", type=str, default=None, metavar="FILE",
@@ -775,17 +794,20 @@ if __name__ == "__main__":
     elif args.import_schedule:
         if not args.gc_team_id:
             parser.error("--import-schedule requires --gc-team-id (the slug/id from the team's GC page URL)")
-        cmd_import_schedule(args.gc_team_id, args.import_schedule)
+        cmd_import_schedule(args.gc_team_id, args.import_schedule,
+                             gc_team_name=args.gc_team_name, pg_team_key=args.pg_team_key)
     elif args.import_roster:
         if not args.gc_team_id:
             parser.error("--import-roster requires --gc-team-id")
-        cmd_import_roster(args.gc_team_id, args.import_roster)
+        cmd_import_roster(args.gc_team_id, args.import_roster,
+                           gc_team_name=args.gc_team_name, pg_team_key=args.pg_team_key)
     elif args.import_boxscore:
         if not args.gc_team_id:
             parser.error("--import-boxscore requires --gc-team-id")
         if not args.gc_game_id:
             parser.error("--import-boxscore requires --gc-game-id (the game id from the box-score page URL)")
-        cmd_import_boxscore(args.gc_team_id, args.gc_game_id, args.import_boxscore, pg_team_key=args.pg_team_key)
+        cmd_import_boxscore(args.gc_team_id, args.gc_game_id, args.import_boxscore,
+                             gc_team_name=args.gc_team_name, pg_team_key=args.pg_team_key)
     elif args.team_url or args.gc_team_id:
         scrape_team(gc_team_url=args.team_url, gc_team_id=args.gc_team_id,
                     pg_team_key=args.pg_team_key, only_new=args.only_new)
