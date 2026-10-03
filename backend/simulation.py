@@ -36,10 +36,17 @@ _DEFAULT_PALETTE = [
  
 def load_tournaments() -> list[dict]:
     """
-    Pull tournaments with status "upcoming" or "in progress" from
-    SQLite. Team data isn't wired up yet (see the commented-out block
-    below) — location/teams are optional in models.Tournament so this
-    works fine without them for now.
+    Pull not-yet-finished tournaments from SQLite. Team data isn't wired up
+    yet (see the commented-out block below) — location/teams are optional
+    in models.Tournament so this works fine without them for now.
+
+    Status alone isn't reliable here: 'scheduled' (not 'upcoming') is what
+    new events actually get in practice (confirmed: 69 of them, vs. only 6
+    stuck on 'upcoming' and 5 on 'ongoing', both stale -- all pre-date
+    today). Rather than require every status label to be kept perfectly
+    current by hand, this also filters on end_date so a tournament that's
+    already finished drops off the list even if nobody's gone back to
+    relabel it 'complete'.
     """
     conn = _get_connection()
     try:
@@ -47,8 +54,9 @@ def load_tournaments() -> list[dict]:
             """
             SELECT eventid, name, status
             FROM events
-            WHERE status IN ('upcoming', 'in progress')
-            ORDER BY name
+            WHERE status IN ('scheduled', 'upcoming', 'ongoing', 'in progress')
+              AND (end_date IS NULL OR date(end_date) >= date('now'))
+            ORDER BY start_date
             """
         ).fetchall()
  
