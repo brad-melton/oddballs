@@ -79,7 +79,7 @@ _GC_GAME_COLUMNS = [
 _GC_BATTING_COLUMNS = ["gc_game_id", "gc_player_id", "ab", "r", "h", "doubles", "triples", "hr",
                        "rbi", "bb", "so", "sb", "hbp", "sf", "sh"]
 _GC_PITCHING_COLUMNS = ["team_key", "player_name", "game_date", "gc_game_id", "gc_player_id",
-                        "ip_outs", "h", "r", "er", "bb", "so", "hr", "pitches", "source",
+                        "ip_outs", "h", "r", "er", "bb", "so", "hr", "pitches", "strikes", "source",
                         "entered_by", "entered_at", "notes"]
 _GC_FIELDING_COLUMNS = ["gc_game_id", "gc_player_id", "errors"]
 
@@ -88,7 +88,8 @@ def enabled() -> bool:
     return bool(TURSO_DATABASE_URL and TURSO_AUTH_TOKEN)
 
 
-def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = None) -> dict:
+def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = None,
+                   sync_pg: bool = True, sync_gc: bool = True) -> dict:
     """
     Pushes events / teams / games from the local sqlite file into Turso.
     No-ops (returns {"synced": False}) if Turso isn't configured.
@@ -106,6 +107,13 @@ def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = 
     GameChanger syncs to just that team's games/stats the same way -- GC
     scrapes are per-team, not per-event, so this is a separate scope
     parameter from event_id, not a reuse of it.
+
+    sync_pg / sync_gc skip that whole side entirely (both default True, the
+    original full-sync behavior). gamechanger_scrape.py calls this with
+    sync_pg=False, since a GC scrape/import never touches events/teams/games
+    and re-syncing all of PG's data on every single GC import was a real
+    confirmed slowdown (the ~6,000+ round trip issue above), not just a
+    theoretical one.
     """
     if not enabled():
         if verbose:
@@ -118,35 +126,25 @@ def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = 
     local.row_factory = sqlite3.Row
     remote = turso_serverless.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
 
+    summary = {"synced": True}
     try:
-        _ensure_remote_gc_schema(remote)
-        events_synced = _sync_events(local, remote, event_id)
-        teams_synced = _sync_teams(local, remote, event_id)
-        games_inserted, games_updated = _sync_games(local, remote, event_id)
-        gc_teams_synced = _sync_gc_teams(local, remote, gc_team_id)
-        gc_players_synced = _sync_gc_players(local, remote, gc_team_id)
-        gc_games_synced = _sync_gc_games(local, remote, gc_team_id)
-        gc_batting_synced = _sync_gc_batting(local, remote, gc_team_id)
-        gc_pitching_synced = _sync_gc_pitching(local, remote, gc_team_id)
-        gc_fielding_synced = _sync_gc_fielding(local, remote, gc_team_id)
+        if sync_pg:
+            summary["events_synced"] = _sync_events(local, remote, event_id)
+            summary["teams_synced"] = _sync_teams(local, remote, event_id)
+            summary["games_inserted"], summary["games_updated"] = _sync_games(local, remote, event_id)
+        if sync_gc:
+            _ensure_remote_gc_schema(remote)
+            summary["gc_teams_synced"] = _sync_gc_teams(local, remote, gc_team_id)
+            summary["gc_players_synced"] = _sync_gc_players(local, remote, gc_team_id)
+            summary["gc_games_synced"] = _sync_gc_games(local, remote, gc_team_id)
+            summary["gc_batting_synced"] = _sync_gc_batting(local, remote, gc_team_id)
+            summary["gc_pitching_synced"] = _sync_gc_pitching(local, remote, gc_team_id)
+            summary["gc_fielding_synced"] = _sync_gc_fielding(local, remote, gc_team_id)
         remote.commit()
     finally:
         local.close()
         remote.close()
 
-    summary = {
-        "synced": True,
-        "events_synced": events_synced,
-        "teams_synced": teams_synced,
-        "games_inserted": games_inserted,
-        "games_updated": games_updated,
-        "gc_teams_synced": gc_teams_synced,
-        "gc_players_synced": gc_players_synced,
-        "gc_games_synced": gc_games_synced,
-        "gc_batting_synced": gc_batting_synced,
-        "gc_pitching_synced": gc_pitching_synced,
-        "gc_fielding_synced": gc_fielding_synced,
-    }
     if verbose:
         print(f"Turso sync complete: {summary}")
     return summary
@@ -319,7 +317,7 @@ _GC_SCHEMA_STATEMENTS = [
         player_name TEXT NOT NULL, game_date TEXT NOT NULL,
         gc_game_id TEXT, gc_player_id TEXT,
         ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-        pitches INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
+        pitches INTEGER, strikes INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
         entered_by TEXT, entered_at TEXT, notes TEXT,
         UNIQUE(gc_game_id, gc_player_id), UNIQUE(team_key, player_name, game_date, source)
     )""",
@@ -335,6 +333,13 @@ def _ensure_remote_gc_schema(remote):
     they don't already exist there from an earlier manual setup."""
     for stmt in _GC_SCHEMA_STATEMENTS:
         _retry(lambda stmt=stmt: remote.execute(stmt))
+    # CREATE TABLE IF NOT EXISTS doesn't add a column to an already-existing
+    # table -- same ALTER TABLE fallback as gamechanger_scrape.py's local
+    # _ensure_schema, for whatever's already live on Turso.
+    try:
+        _retry(lambda: remote.execute("ALTER TABLE gc_pitching_stats ADD COLUMN strikes INTEGER"))
+    except Exception:
+        pass  # column already exists
 
 
 def _sync_gc_teams(local, remote, gc_team_id: str = None) -> int:
@@ -456,7 +461,7 @@ def _sync_gc_pitching(local, remote, gc_team_id: str = None) -> int:
                 ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
                   team_key=excluded.team_key, player_name=excluded.player_name, game_date=excluded.game_date,
                   ip_outs=excluded.ip_outs, h=excluded.h, r=excluded.r, er=excluded.er, bb=excluded.bb,
-                  so=excluded.so, hr=excluded.hr, pitches=excluded.pitches""",
+                  so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes""",
             [row[c] for c in cols],
         ))
     return len(rows)

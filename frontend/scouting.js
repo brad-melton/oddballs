@@ -52,6 +52,11 @@ function renderTeamSearchResults(teams) {
   });
 }
 
+function _badgeSpan(badges) {
+  if (!badges || badges.length === 0) return '';
+  return ` <span class="scouting-badges">${badges.join('')}</span>`;
+}
+
 /* ---------- team report ---------- */
 async function selectTeam(teamKey, teamName) {
   selectedTeamKey = teamKey;
@@ -88,7 +93,7 @@ function renderTeamReport(data) {
 
   const rows = data.roster.map(p => `
     <tr class="scouting-row" data-player-name="${p.player_name}">
-      <td class="name-cell">${p.player_name}</td>
+      <td class="name-cell">${p.player_name}${_badgeSpan(p.badges)}</td>
       <td>${p.games_played}</td>
       <td>${p.avg !== null ? p.avg.toFixed(3).replace(/^0/, '') : '—'}</td>
       <td>${p.hr}</td>
@@ -96,6 +101,8 @@ function renderTeamReport(data) {
       <td>${p.ip || '—'}</td>
       <td>${p.era !== null ? p.era.toFixed(2) : '—'}</td>
       <td>${p.so_pitching}</td>
+      <td>${p.pitches ?? '—'}</td>
+      <td>${p.strike_pct !== null ? p.strike_pct + '%' : '—'}</td>
     </tr>
   `).join('');
 
@@ -103,9 +110,15 @@ function renderTeamReport(data) {
     <p class="admin-selected-name">${data.team_name}</p>
     ${data.last_scraped ? `<p class="placeholder-note" style="text-align:left; padding:2px 0 12px; font-size:11px;">Last scraped: ${data.last_scraped.split('T')[0]}</p>` : ''}
     <table class="roster">
-      <thead><tr><th>Player</th><th>GP</th><th>AVG</th><th>HR</th><th>RBI</th><th>IP</th><th>ERA</th><th>SO (P)</th></tr></thead>
+      <thead><tr>
+        <th>Player</th><th>GP</th><th>AVG</th><th>HR</th><th>RBI</th><th>IP</th><th>ERA</th><th>SO (P)</th><th>Pitches</th><th>Strike%</th>
+      </tr></thead>
       <tbody>${rows}</tbody>
     </table>
+    <p class="placeholder-note" style="text-align:left; padding:10px 0 0; font-size:11px;">
+      🏏 high average &nbsp; 💪 extra-base power &nbsp; 🌀 strikeout-prone &nbsp; 👁️ plate discipline (walks)
+      — relative to this roster, min. 3 AB.
+    </p>
   `;
 
   content.querySelectorAll('.scouting-row').forEach(row => {
@@ -132,17 +145,30 @@ async function selectPlayer(playerName) {
   }
 }
 
-function _gameLogTable(rows, columns) {
+function _gameLogTable(rows, columns, totals) {
   if (rows.length === 0) return `<p class="placeholder-note">No games logged yet.</p>`;
   const head = columns.map(c => `<th>${c.label}</th>`).join('');
   const body = rows.map(r => `
     <tr>
       <td class="name-cell">${r.game_date ? r.game_date.split('T')[0] : '—'}</td>
       <td>${r.opponent || '—'}</td>
-      ${columns.slice(2).map(c => `<td>${r[c.key] ?? '—'}</td>`).join('')}
+      ${columns.slice(2).map(c => `<td>${_fmt(r[c.key], c.key)}</td>`).join('')}
     </tr>
   `).join('');
-  return `<table class="roster"><thead><tr>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  const totalsRow = totals ? `
+    <tr class="scouting-totals-row">
+      <td class="name-cell">Total</td>
+      <td></td>
+      ${columns.slice(2).map(c => `<td>${c.key in totals ? _fmt(totals[c.key], c.key) : '—'}</td>`).join('')}
+    </tr>
+  ` : '';
+  return `<table class="roster"><thead><tr>${head}</tr></thead><tbody>${body}${totalsRow}</tbody></table>`;
+}
+
+function _fmt(value, key) {
+  if (value === null || value === undefined) return '—';
+  if (key === 'strike_pct') return `${value}%`;
+  return value;
 }
 
 function renderPlayerProfile(data) {
@@ -158,6 +184,7 @@ function renderPlayerProfile(data) {
     { key: 'game_date', label: 'Date' }, { key: 'opponent', label: 'Opp' },
     { key: 'ip', label: 'IP' }, { key: 'h', label: 'H' }, { key: 'r', label: 'R' }, { key: 'er', label: 'ER' },
     { key: 'bb', label: 'BB' }, { key: 'so', label: 'SO' }, { key: 'pitches', label: 'Pitches' },
+    { key: 'strikes', label: 'Strikes' }, { key: 'strike_pct', label: 'Strike%' },
   ];
   const fieldingCols = [
     { key: 'game_date', label: 'Date' }, { key: 'opponent', label: 'Opp' }, { key: 'errors', label: 'E' },
@@ -171,10 +198,10 @@ function renderPlayerProfile(data) {
       <button class="mode-tab scouting-tab ${activePlayerTab === 'fielding' ? 'active' : ''}" data-tab="fielding">Fielding</button>
     </div>
     <div id="scoutingTabBatting" style="${activePlayerTab === 'batting' ? '' : 'display:none;'}">
-      ${_gameLogTable(data.batting_log, battingCols)}
+      ${_gameLogTable(data.batting_log, battingCols, data.batting_totals)}
     </div>
     <div id="scoutingTabPitching" style="${activePlayerTab === 'pitching' ? '' : 'display:none;'}">
-      ${_gameLogTable(data.pitching_log, pitchingCols)}
+      ${_gameLogTable(data.pitching_log, pitchingCols, data.pitching_totals)}
     </div>
     <div id="scoutingTabFielding" style="${activePlayerTab === 'fielding' ? '' : 'display:none;'}">
       ${_gameLogTable(data.fielding_log, fieldingCols)}

@@ -43,7 +43,7 @@ _SCHEMA_STATEMENTS = [
         player_name TEXT NOT NULL, game_date TEXT NOT NULL,
         gc_game_id TEXT, gc_player_id TEXT,
         ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-        pitches INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
+        pitches INTEGER, strikes INTEGER, source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
         entered_by TEXT, entered_at TEXT, notes TEXT,
         UNIQUE(gc_game_id, gc_player_id), UNIQUE(team_key, player_name, game_date, source)
     )""",
@@ -60,6 +60,13 @@ def ensure_scouting_schema():
     try:
         for stmt in _SCHEMA_STATEMENTS:
             conn.execute(stmt)
+        # CREATE TABLE IF NOT EXISTS doesn't add a column to a table that
+        # already exists from before it was added -- same ALTER TABLE
+        # fallback as gamechanger_scrape.py/turso_sync.py use.
+        try:
+            conn.execute("ALTER TABLE gc_pitching_stats ADD COLUMN strikes INTEGER")
+        except Exception:
+            pass  # column already exists
         conn.commit()
     finally:
         conn.close()
@@ -100,6 +107,54 @@ def search_scouting_teams(query: str) -> list[dict]:
         conn.close()
 
 
+def _top_n_value(values, n=3):
+    """Given a list of numbers, returns the value at rank n (ties included),
+    or None if there are no positive values at all. Used so "high X" badges
+    flag roughly the top 3 on a roster rather than an arbitrary fixed
+    threshold that wouldn't translate across age groups/skill levels."""
+    positive = sorted((v for v in values if v and v > 0), reverse=True)
+    if not positive:
+        return None
+    return positive[min(n, len(positive)) - 1]
+
+
+# Minimum at-bats to be eligible for any batting badge -- keeps a 1-for-1
+# fluke from flagging as "high average" on a small youth-ball sample.
+_BADGE_MIN_AB = 3
+
+BADGE_HIGH_AVG = "\U0001F3CF"     # high batting average
+BADGE_POWER = "\U0001F4AA"        # extra-base-hit power
+BADGE_HIGH_SO = "\U0001F300"      # strikeout-prone at the plate
+BADGE_HIGH_BB = "\U0001F441️"  # plate discipline / walks
+
+
+def _compute_badges(roster_raw: list[dict]) -> dict:
+    """roster_raw: dicts with player_name, ab, avg, xbh, so, bb. Returns
+    {player_name: [badge emoji, ...]}, comparing each player against the
+    rest of THIS roster (a scouting tool is inherently relative -- "who
+    stands out on this team" matters more than a fixed league-wide cutoff)."""
+    qualified = [r for r in roster_raw if (r["ab"] or 0) >= _BADGE_MIN_AB]
+    avg_cut = _top_n_value([r["avg"] for r in qualified if r["avg"] is not None])
+    xbh_cut = _top_n_value([r["xbh"] for r in qualified])
+    so_cut = _top_n_value([r["so"] for r in qualified])
+    bb_cut = _top_n_value([r["bb"] for r in qualified])
+
+    badges = {}
+    for r in qualified:
+        earned = []
+        if avg_cut is not None and (r["avg"] or 0) >= avg_cut:
+            earned.append(BADGE_HIGH_AVG)
+        if xbh_cut is not None and (r["xbh"] or 0) >= xbh_cut:
+            earned.append(BADGE_POWER)
+        if so_cut is not None and (r["so"] or 0) >= so_cut:
+            earned.append(BADGE_HIGH_SO)
+        if bb_cut is not None and (r["bb"] or 0) >= bb_cut:
+            earned.append(BADGE_HIGH_BB)
+        if earned:
+            badges[r["player_name"]] = earned
+    return badges
+
+
 def get_team_scouting_report(team_key: int) -> dict:
     conn = _get_connection()
     try:
@@ -121,13 +176,14 @@ def get_team_scouting_report(team_key: int) -> dict:
             tuple(gc_team_ids),
         ).fetchone()
 
-        roster = []
+        roster_raw = []
         for p in players:
             gc_player_id, player_name = p["gc_player_id"], p["player_name"]
 
             bat = conn.execute(
                 """SELECT COUNT(DISTINCT gc_game_id) AS games, SUM(ab) AS ab, SUM(h) AS h,
-                          SUM(hr) AS hr, SUM(rbi) AS rbi
+                          SUM(doubles) AS doubles, SUM(triples) AS triples, SUM(hr) AS hr,
+                          SUM(rbi) AS rbi, SUM(bb) AS bb, SUM(so) AS so
                    FROM gc_batting_stats WHERE gc_player_id = ?""",
                 (gc_player_id,),
             ).fetchone()
@@ -136,14 +192,19 @@ def get_team_scouting_report(team_key: int) -> dict:
             # double-count a game the scraper later also picks up. Keeping
             # this report's totals scraped-only avoids that overlap.
             pitch = conn.execute(
-                """SELECT SUM(ip_outs) AS ip_outs, SUM(er) AS er, SUM(so) AS so
+                """SELECT SUM(ip_outs) AS ip_outs, SUM(er) AS er, SUM(so) AS so,
+                          SUM(pitches) AS pitches, SUM(strikes) AS strikes
                    FROM gc_pitching_stats WHERE gc_player_id = ? AND source = 'scraped'""",
                 (gc_player_id,),
             ).fetchone()
 
             ab = bat["ab"] or 0
             hits = bat["h"] or 0
+            avg = round(hits / ab, 3) if ab > 0 else None
+            xbh = (bat["doubles"] or 0) + (bat["triples"] or 0) + (bat["hr"] or 0)
             ip_outs = pitch["ip_outs"] or 0
+            pitches = pitch["pitches"] or 0
+            strikes = pitch["strikes"]
             era = None
             if ip_outs > 0:
                 # 9-inning convention -- youth games are shorter, but this is
@@ -151,16 +212,29 @@ def get_team_scouting_report(team_key: int) -> dict:
                 # so it's not the only number in the picture.
                 era = round((pitch["er"] or 0) * 9 / (ip_outs / 3), 2)
 
-            roster.append({
+            roster_raw.append({
                 "player_name": player_name,
                 "games_played": bat["games"] or 0,
-                "avg": round(hits / ab, 3) if ab > 0 else None,
+                "ab": ab, "avg": avg, "xbh": xbh,
+                "so": bat["so"] or 0, "bb": bat["bb"] or 0,
                 "hr": bat["hr"] or 0,
                 "rbi": bat["rbi"] or 0,
                 "ip": _format_ip(ip_outs) if ip_outs else None,
                 "era": era,
                 "so_pitching": pitch["so"] or 0,
+                "pitches": pitches if pitches else None,
+                "strike_pct": round(strikes / pitches * 100) if strikes is not None and pitches > 0 else None,
             })
+
+        badges_by_player = _compute_badges(roster_raw)
+        roster = [
+            {**r, "badges": badges_by_player.get(r["player_name"], [])}
+            for r in roster_raw
+        ]
+        # Internal-only fields used for badge math, not part of the response shape.
+        for r in roster:
+            for k in ("ab", "xbh", "so", "bb"):
+                r.pop(k, None)
 
         roster.sort(key=lambda r: r["player_name"])
         return {
@@ -203,7 +277,7 @@ def get_player_scouting_profile(team_key: int, player_name: str) -> dict:
 
         pitching_log = conn.execute(
             f"""SELECT g.game_date, g.opponent_name, ps.ip_outs, ps.h, ps.r, ps.er,
-                       ps.bb, ps.so, ps.pitches
+                       ps.bb, ps.so, ps.pitches, ps.strikes
                 FROM gc_pitching_stats ps JOIN gc_games g ON g.gc_game_id = ps.gc_game_id
                 WHERE ps.gc_player_id IN ({p_placeholders}) AND ps.source = 'scraped'
                 ORDER BY g.game_date""",
@@ -220,13 +294,19 @@ def get_player_scouting_profile(team_key: int, player_name: str) -> dict:
         def _sum(rows, col):
             return sum((r[col] or 0) for r in rows)
 
+        def _strike_pct(strikes, pitches):
+            return round(strikes / pitches * 100) if strikes is not None and pitches else None
+
         batting_totals = {c: _sum(batting_log, c) for c in
                            ("ab", "r", "h", "doubles", "triples", "hr", "rbi", "bb", "so", "sb")}
         pitching_ip_outs = _sum(pitching_log, "ip_outs")
+        total_pitches = _sum(pitching_log, "pitches")
+        total_strikes = _sum(pitching_log, "strikes") if any(r["strikes"] is not None for r in pitching_log) else None
         pitching_totals = {
             "ip": _format_ip(pitching_ip_outs),
             "h": _sum(pitching_log, "h"), "r": _sum(pitching_log, "r"), "er": _sum(pitching_log, "er"),
-            "bb": _sum(pitching_log, "bb"), "so": _sum(pitching_log, "so"), "pitches": _sum(pitching_log, "pitches"),
+            "bb": _sum(pitching_log, "bb"), "so": _sum(pitching_log, "so"), "pitches": total_pitches,
+            "strikes": total_strikes, "strike_pct": _strike_pct(total_strikes, total_pitches),
         }
 
         return {
@@ -243,7 +323,8 @@ def get_player_scouting_profile(team_key: int, player_name: str) -> dict:
             "pitching_log": [
                 {"game_date": r["game_date"], "opponent": r["opponent_name"], "ip": _format_ip(r["ip_outs"]),
                  "h": r["h"] or 0, "r": r["r"] or 0, "er": r["er"] or 0, "bb": r["bb"] or 0,
-                 "so": r["so"] or 0, "pitches": r["pitches"]}
+                 "so": r["so"] or 0, "pitches": r["pitches"], "strikes": r["strikes"],
+                 "strike_pct": _strike_pct(r["strikes"], r["pitches"])}
                 for r in pitching_log
             ],
             "pitching_totals": pitching_totals,

@@ -35,9 +35,16 @@ deploy/
 gc_storage_state.json
 .gc_login_profile/
 
-# Real GameChanger data captured during development/recon -- not needed
-# once its shape has been coded against, and may contain real player names.
+# Real GameChanger data -- box scores/schedules/rosters saved by hand for
+# --import-* (see gamechanger_scrape.py), plus recon fixtures. Contains
+# real player names; never commit this to a public repo. Save these into
+# gc_imports/ going forward so this one pattern catches all of them;
+# individual legacy filenames are listed too for anything saved before
+# that convention existed.
+gc_imports/
 sample boxscore.json
+Scorpions-Lymbo.json
+Scorpions-Lonestar.json
 
 # Editor / OS
 .vscode/

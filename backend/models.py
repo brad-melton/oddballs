@@ -272,6 +272,12 @@ class TeamScoutingRosterRow(BaseModel):
     ip: Optional[str] = None
     era: Optional[float] = None
     so_pitching: int
+    pitches: Optional[int] = None
+    strike_pct: Optional[float] = None
+    # Emoji flags vs. the rest of this roster: high AVG, extra-base power,
+    # strikeout-prone at the plate, and plate discipline (walks). See
+    # scouting._compute_badges for the ranking logic.
+    badges: List[str] = []
 
 
 class TeamScoutingReportResponse(BaseModel):
@@ -306,6 +312,8 @@ class PlayerPitchingLine(BaseModel):
     bb: int
     so: int
     pitches: Optional[int] = None
+    strikes: Optional[int] = None
+    strike_pct: Optional[float] = None
 
 
 class PlayerFieldingLine(BaseModel):

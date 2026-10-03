@@ -181,7 +181,7 @@ def _ensure_schema(conn):
             gc_game_id TEXT,
             gc_player_id TEXT,
             ip_outs INTEGER, h INTEGER, r INTEGER, er INTEGER, bb INTEGER, so INTEGER, hr INTEGER,
-            pitches INTEGER,
+            pitches INTEGER, strikes INTEGER,
             source TEXT NOT NULL CHECK(source IN ('scraped','manual')),
             entered_by TEXT, entered_at TEXT, notes TEXT,
             UNIQUE(gc_game_id, gc_player_id),
@@ -195,7 +195,18 @@ def _ensure_schema(conn):
             PRIMARY KEY (gc_game_id, gc_player_id)
         );
     """)
+    # CREATE TABLE IF NOT EXISTS doesn't add columns to a table that already
+    # exists from before this column was added (e.g. this laptop's already-
+    # imported data) -- this codebase has no formal migration tool, so this
+    # is the minimal equivalent: add the column by hand if it's missing.
+    _ensure_column(conn, "gc_pitching_stats", "strikes", "INTEGER")
     conn.commit()
+
+
+def _ensure_column(conn, table, column, coltype):
+    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    if column not in cols:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
 
 # ==============================================================================
@@ -368,17 +379,17 @@ def _upsert_fielding(conn, gc_game_id, gc_player_id, errors):
 
 
 def _upsert_pitching_scraped(conn, team_key, player_name, game_date, gc_game_id, gc_player_id,
-                              ip_outs, h, r, er, bb, so, hr, pitches):
+                              ip_outs, h, r, er, bb, so, hr, pitches, strikes):
     conn.execute(
         """INSERT INTO gc_pitching_stats
-           (team_key, player_name, game_date, gc_game_id, gc_player_id, ip_outs, h, r, er, bb, so, hr, pitches, source)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scraped')
+           (team_key, player_name, game_date, gc_game_id, gc_player_id, ip_outs, h, r, er, bb, so, hr, pitches, strikes, source)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'scraped')
            ON CONFLICT(gc_game_id, gc_player_id) DO UPDATE SET
              team_key=excluded.team_key, player_name=excluded.player_name, game_date=excluded.game_date,
              ip_outs=excluded.ip_outs, h=excluded.h, r=excluded.r, er=excluded.er, bb=excluded.bb,
-             so=excluded.so, hr=excluded.hr, pitches=excluded.pitches""",
+             so=excluded.so, hr=excluded.hr, pitches=excluded.pitches, strikes=excluded.strikes""",
         (team_key, player_name, game_date, gc_game_id, gc_player_id,
-         ip_outs, h, r, er, bb, so, hr, pitches),
+         ip_outs, h, r, er, bb, so, hr, pitches, strikes),
     )
 
 
@@ -446,12 +457,19 @@ def _parse_team_block(conn, team_block, gc_game_id, team_key, gc_team_id=None):
                     _upsert_fielding(conn, gc_game_id, gc_player_id, errors_by_player[gc_player_id])
 
         elif category == "pitching":
+            # "#P" = pitch count, "TS" = total strikes thrown -- both only
+            # appear as "extra" stats (alongside the base IP/H/R/ER/BB/SO
+            # line), same as batting's 2B/3B/etc.
             pitches_by_player = {}
+            strikes_by_player = {}
             for extra in group.get("extra", []):
-                if extra.get("stat_name") != "#P":
-                    continue
-                for s in extra.get("stats", []):
-                    pitches_by_player[s["player_id"]] = s["value"]
+                stat_name = extra.get("stat_name")
+                if stat_name == "#P":
+                    for s in extra.get("stats", []):
+                        pitches_by_player[s["player_id"]] = s["value"]
+                elif stat_name == "TS":
+                    for s in extra.get("stats", []):
+                        strikes_by_player[s["player_id"]] = s["value"]
 
             game_row = conn.execute("SELECT game_date FROM gc_games WHERE gc_game_id = ?", (gc_game_id,)).fetchone()
             game_date = game_row[0] if game_row else None
@@ -470,6 +488,7 @@ def _parse_team_block(conn, team_block, gc_game_id, team_key, gc_team_id=None):
                     h=stats.get("H", 0), r=stats.get("R", 0), er=stats.get("ER", 0),
                     bb=stats.get("BB", 0), so=stats.get("SO", 0), hr=stats.get("HR", 0),
                     pitches=pitches_by_player.get(gc_player_id),
+                    strikes=strikes_by_player.get(gc_player_id),
                 )
 
     # No richer fielding breakdown (no putouts/assists/position) -- GC's box
@@ -672,13 +691,18 @@ def scrape_team(gc_team_url=None, gc_team_id=None, pg_team_key=None, only_new=Tr
 
 def _sync_after_import(gc_team_id):
     """A sync hiccup shouldn't take down an otherwise-successful local
-    import/scrape with a crash -- the local data is already saved either way."""
+    import/scrape with a crash -- the local data is already saved either way.
+
+    sync_pg=False: a GC scrape/import never touches events/teams/games, so
+    there's no reason to also re-push the entire PG side every time (that's
+    ~6,000+ round trips regardless of what changed -- confirmed slow enough
+    to make this hang for minutes on a run that should take seconds)."""
     import turso_sync
     if not turso_sync.enabled():
         print("TURSO_DATABASE_URL/TURSO_AUTH_TOKEN not set -- skipping Turso sync (local-only run).")
         return
     try:
-        turso_sync.sync_to_turso(gc_team_id=gc_team_id)
+        turso_sync.sync_to_turso(gc_team_id=gc_team_id, sync_pg=False)
     except Exception as e:
         print(f"Local data saved, but the Turso sync failed: {e}")
         logging.error(f"Turso sync failed after import for gc_team_id={gc_team_id}: {e}")
