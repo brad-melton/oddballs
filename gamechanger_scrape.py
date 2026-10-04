@@ -224,9 +224,12 @@ def _ensure_column(conn, table, column, coltype):
 
 def _normalize_team_url(url):
     """Accepts anything from a bare team home URL to a full box-score URL
-    someone pasted, and returns just the team's base URL
-    (https://web.gc.com/teams/{slug}/{name-slug})."""
-    m = re.match(r"(https://web\.gc\.com/teams/[^/]+/[^/]+)", url.strip())
+    someone pasted, and returns just the team's base URL -- either
+    https://web.gc.com/teams/{slug}/{name-slug} or the shorter
+    https://web.gc.com/teams/{slug} with no name segment (confirmed via a
+    real scrape that GC's API accepts this form too; a scrape run against
+    it is exactly what originally exposed the bug below)."""
+    m = re.match(r"(https://web\.gc\.com/teams/[^/?]+(?:/[^/?]+)?)", url.strip())
     if not m:
         logging.warning(f"Couldn't normalize team URL, using as-is: {url}")
         return url.rstrip("/")
@@ -234,7 +237,12 @@ def _normalize_team_url(url):
 
 
 def _extract_gc_slug(gc_url):
-    m = re.search(r"/teams/([^/]+)/", gc_url)
+    """Matches both /teams/{slug}/{name} and the bare /teams/{slug} (end of
+    string or a query string) -- a URL missing the trailing name segment
+    used to silently produce None here, which scrape_team() then silently
+    accepted as a real team id, corrupting every row it wrote (confirmed:
+    a real past run did exactly this -- see scrape_team()'s id validation)."""
+    m = re.search(r"/teams/([^/?]+)(?:/|\?|$)", gc_url)
     return m.group(1) if m else None
 
 
@@ -753,6 +761,14 @@ def scrape_team(gc_team_url=None, gc_team_id=None, pg_team_key=None, only_new=Tr
 
             slug = _extract_gc_slug(gc_team_url) or gc_team_id
             real_gc_team_id = gc_team_id or slug
+            if not real_gc_team_id:
+                # Confirmed this can happen for real: a URL missing the
+                # team-name segment used to make _extract_gc_slug return
+                # None silently, which every write below then accepted as
+                # a real id -- corrupting every row with gc_team_id=NULL
+                # instead of failing loudly. Refuse instead.
+                print(f"Couldn't determine a GameChanger team id from '{gc_team_url}'. Check the URL and try again.")
+                return
             _upsert_gc_team(conn, real_gc_team_id, slug, gc_url=gc_team_url, pg_team_key=pg_team_key)
 
             for player in roster:
