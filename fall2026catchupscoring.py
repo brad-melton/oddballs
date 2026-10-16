@@ -590,8 +590,14 @@ def scrape_pg_team_page(team_index):
     }
 
 
-def phase_3a_enrich_teams():
-    """PHASE 3A: Enrich Teams Table"""
+def phase_3a_enrich_teams(event_id=None):
+    """PHASE 3A: Enrich Teams Table
+
+    event_id: if given, only considers teams that actually played in that
+    event's games, instead of every distinct team name across the whole
+    games table (confirmed: this was never scoped at all, regardless of
+    --event -- Phase 3A/3B were the only two phases not threading event_id
+    through, re-scanning every game in the database on every run)."""
     print("\n" + "="*70)
     print("PHASE 3A: ENRICHING TEAMS TABLE")
     print("="*70 + "\n")
@@ -614,11 +620,18 @@ def phase_3a_enrich_teams():
         conn.commit()
 
         # Extract distinct teams from games table
-        cur.execute("""
-            SELECT DISTINCT away_team FROM games
-            UNION
-            SELECT DISTINCT home_team FROM games
-        """)
+        if event_id:
+            cur.execute("""
+                SELECT DISTINCT away_team FROM games WHERE eventid = ?
+                UNION
+                SELECT DISTINCT home_team FROM games WHERE eventid = ?
+            """, (event_id, event_id))
+        else:
+            cur.execute("""
+                SELECT DISTINCT away_team FROM games
+                UNION
+                SELECT DISTINCT home_team FROM games
+            """)
 
         teams = [row[0] for row in cur.fetchall()]
         print(f"Found {len(teams)} teams to process.\n")
@@ -707,8 +720,11 @@ def phase_3a_enrich_teams():
         print(f"\n!!! Fatal Error in Phase 3A: {e}")
 
 
-def phase_3b_populate_team_keys():
-    """PHASE 3B: Populate Team Keys in Games Table"""
+def phase_3b_populate_team_keys(event_id=None):
+    """PHASE 3B: Populate Team Keys in Games Table
+
+    event_id: if given, only touches that event's games instead of every
+    row in the games table (same unscoped-by-default bug as Phase 3A)."""
     print("\n" + "="*70)
     print("PHASE 3B: POPULATING TEAM KEYS IN GAMES TABLE")
     print("="*70 + "\n")
@@ -717,12 +733,20 @@ def phase_3b_populate_team_keys():
         conn = sqlite3.connect(SQLITE_DB)
         cur = conn.cursor()
 
-        # Get all games
-        cur.execute("""
-            SELECT id, home_team, away_team
-            FROM games
-            ORDER BY id
-        """)
+        # Get games (scoped to the event, if given)
+        if event_id:
+            cur.execute("""
+                SELECT id, home_team, away_team
+                FROM games
+                WHERE eventid = ?
+                ORDER BY id
+            """, (event_id,))
+        else:
+            cur.execute("""
+                SELECT id, home_team, away_team
+                FROM games
+                ORDER BY id
+            """)
 
         games = cur.fetchall()
         print(f"Processing {len(games)} games for team key population...\n")
@@ -805,8 +829,8 @@ def main(event_id=None):
         # Run all phases
         phase_1_scrape_games(event_id=event_id)
         phase_2_enrich_brackets(event_id=event_id)
-        phase_3a_enrich_teams()
-        phase_3b_populate_team_keys()
+        phase_3a_enrich_teams(event_id=event_id)
+        phase_3b_populate_team_keys(event_id=event_id)
 
         print("\n" + "="*70)
         print("PHASE 4: SYNCING NEW DATA TO TURSO")
