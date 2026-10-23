@@ -249,15 +249,35 @@ def get_games_from_url(url, event_id, game_date, game_format):
 
 
 def insert_games_to_db(games_list, db_path):
-    """Inserts game records into the 'games' table."""
+    """
+    Inserts game records into the 'games' table.
+
+    Deletes any existing row for the same (eventid, game_num) first --
+    there's no UNIQUE constraint on games, so a plain append is not
+    idempotent: re-scraping the same event/date (e.g. a retried or
+    re-run pipeline call) silently duplicated every game on it every
+    time (confirmed: one event had been scraped 5x, leaving 5 identical
+    copies of each of its 13 games). game_num is Perfect Game's own
+    globally-unique GameID, so this is a reliable natural key; rows with
+    no game_num are left alone and just appended, same as before, since
+    there's no safe key to dedupe them on.
+    """
     if not games_list:
         return
 
     try:
-        df_games = pd.DataFrame(games_list)
-
         with sqlite3.connect(db_path) as conn:
+            cur = conn.cursor()
+            for game in games_list:
+                if game.get("game_num") is not None:
+                    cur.execute(
+                        "DELETE FROM games WHERE eventid = ? AND game_num = ?",
+                        (game["eventid"], game["game_num"]),
+                    )
+
+            df_games = pd.DataFrame(games_list)
             df_games.to_sql('games', conn, if_exists='append', index=False)
+            conn.commit()
 
         print(f"      [Success] Inserted {len(games_list)} games")
 
