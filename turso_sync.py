@@ -23,6 +23,7 @@ via env_local.py). Safe to call unconditionally from the pipeline's main()
 -- no-ops with a notice if they aren't set, so local-only runs are
 unaffected.
 """
+import logging
 import os
 import sqlite3
 import time
@@ -126,27 +127,47 @@ def sync_to_turso(verbose: bool = True, event_id: str = None, gc_team_id: str = 
     local.row_factory = sqlite3.Row
     remote = turso_serverless.connect(TURSO_DATABASE_URL, auth_token=TURSO_AUTH_TOKEN)
 
+    def _step(label, fn):
+        # Previously the only output from this whole function was one
+        # summary line at the very end -- a multi-minute sync looked
+        # indistinguishable from a hang, and if a run's numbers looked
+        # wrong afterward there was no way to tell which step was
+        # responsible without re-running it. Printing (and logging) each
+        # step as it finishes fixes both.
+        result = fn()
+        if verbose:
+            print(f"  ...{label}: {result}")
+        logging.info(f"turso_sync {label}: {result}")
+        return result
+
     summary = {"synced": True}
     try:
         if sync_pg:
-            summary["events_synced"] = _sync_events(local, remote, event_id)
-            summary["teams_synced"] = _sync_teams(local, remote, event_id)
-            summary["games_inserted"], summary["games_updated"] = _sync_games(local, remote, event_id)
+            summary["events_synced"] = _step("events_synced", lambda: _sync_events(local, remote, event_id))
+            summary["teams_synced"] = _step("teams_synced", lambda: _sync_teams(local, remote, event_id))
+            summary["games_inserted"], summary["games_updated"] = _step(
+                "games (inserted, updated)", lambda: _sync_games(local, remote, event_id)
+            )
         if sync_gc:
             _ensure_remote_gc_schema(remote)
-            summary["gc_teams_synced"] = _sync_gc_teams(local, remote, gc_team_id)
-            summary["gc_players_synced"] = _sync_gc_players(local, remote, gc_team_id)
-            summary["gc_games_synced"] = _sync_gc_games(local, remote, gc_team_id)
-            summary["gc_batting_synced"] = _sync_gc_batting(local, remote, gc_team_id)
-            summary["gc_pitching_synced"] = _sync_gc_pitching(local, remote, gc_team_id)
-            summary["gc_fielding_synced"] = _sync_gc_fielding(local, remote, gc_team_id)
+            summary["gc_teams_synced"] = _step("gc_teams_synced", lambda: _sync_gc_teams(local, remote, gc_team_id))
+            summary["gc_players_synced"] = _step("gc_players_synced", lambda: _sync_gc_players(local, remote, gc_team_id))
+            summary["gc_games_synced"] = _step("gc_games_synced", lambda: _sync_gc_games(local, remote, gc_team_id))
+            summary["gc_batting_synced"] = _step("gc_batting_synced", lambda: _sync_gc_batting(local, remote, gc_team_id))
+            summary["gc_pitching_synced"] = _step("gc_pitching_synced", lambda: _sync_gc_pitching(local, remote, gc_team_id))
+            summary["gc_fielding_synced"] = _step("gc_fielding_synced", lambda: _sync_gc_fielding(local, remote, gc_team_id))
+        if verbose:
+            print("  ...committing...")
         remote.commit()
+        if verbose:
+            print("  ...committed.")
     finally:
         local.close()
         remote.close()
 
     if verbose:
         print(f"Turso sync complete: {summary}")
+    logging.info(f"Turso sync complete: {summary}")
     return summary
 
 
