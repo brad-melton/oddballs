@@ -326,3 +326,17 @@ async function linkGcTeam(gcTeamId, pgTeamKey, i) {
 
 document.getElementById('refreshMappingsBtn').addEventListener('click', loadGcMappings);
 loadGcMappings();
+
+/* ---------- static copy-command buttons (GameChanger steps card) ---------- */
+document.querySelectorAll('.copy-cmd-btn').forEach(btn => {
+  const pre = btn.previousElementSibling;
+  btn.addEventListener('click', () => {
+    navigator.clipboard.writeText(pre.textContent)
+      .then(() => {
+        const original = btn.textContent;
+        btn.textContent = 'Copied!';
+        setTimeout(() => { btn.textContent = original; }, 1500);
+      })
+      .catch(() => {});
+  });
+});

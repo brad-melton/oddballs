@@ -86,6 +86,38 @@
   </div>
 
   <div class="card">
+    <p class="card-label">Scraping GameChanger data</p>
+    <p class="placeholder-note" style="text-align:left; padding:0 0 12px;">
+      Run these from your laptop, in <code>PerfectGame/</code>, with
+      <code>.env.local</code> configured. Pulls batting/pitching/fielding
+      stats into this same hosted database for the
+      <a href="scouting.html" class="admin-link" style="position:static; display:inline;">Scouting</a> page.
+    </p>
+
+    <p class="admin-filter-label">1. Log in (first time, or after a scrape fails with an auth error)</p>
+    <p class="placeholder-note" style="text-align:left; padding:0; font-size:11px;">
+      Opens a real Chrome window — log into GameChanger by hand, then the session is saved for future runs.
+    </p>
+    <pre class="admin-code">python gamechanger_scrape.py --login</pre>
+    <button class="mode-tab copy-cmd-btn" style="padding:6px 14px;">Copy command</button>
+
+    <p class="admin-filter-label" style="margin-top:16px;">2. First time scraping a team</p>
+    <p class="placeholder-note" style="text-align:left; padding:0; font-size:11px;">
+      Replace &lt;team-url&gt; with the team's full GameChanger page URL. &lt;pg-team-key&gt; is
+      the matching PG team's <strong>ID</strong> (not Team Index) — optional here, you can map it below instead.
+    </p>
+    <pre class="admin-code">python gamechanger_scrape.py --team-url &lt;team-url&gt; --pg-team-key &lt;pg-team-key&gt;</pre>
+    <button class="mode-tab copy-cmd-btn" style="padding:6px 14px;">Copy command</button>
+
+    <p class="admin-filter-label" style="margin-top:16px;">3. Re-scrape a team already stored</p>
+    <p class="placeholder-note" style="text-align:left; padding:0; font-size:11px;">
+      Use the GC team id printed by step 2. Pulls any newly-completed games since the last scrape.
+    </p>
+    <pre class="admin-code">python gamechanger_scrape.py --gc-team-id &lt;gc-team-id&gt;</pre>
+    <button class="mode-tab copy-cmd-btn" style="padding:6px 14px;">Copy command</button>
+  </div>
+
+  <div class="card">
     <div style="display:flex; align-items:center; justify-content:space-between; margin-bottom:10px;">
       <p class="card-label" style="margin:0;">GameChanger team links</p>
       <button class="mode-tab" id="refreshMappingsBtn" style="padding:6px 14px;">↻ Refresh</button>
@@ -93,7 +125,7 @@
     <p class="placeholder-note" style="text-align:left; padding:0 0 12px;">
       Links a scraped GameChanger team to an existing Perfect Game team so its
       stats show up on the <a href="scouting.html" class="admin-link" style="position:static; display:inline;">Scouting</a> page.
-      Scrape a team first with <code>gamechanger_scrape.py --team-url ...</code>, then map it here.
+      Scrape a team first with the steps above, then map it here.
     </p>
     <div id="gcMappingList"><p class="placeholder-note">Loading…</p></div>
   </div>
